@@ -1,0 +1,1 @@
+The real [cppcoro](https://github.com/lewissbaker/cppcoro) library is huge and obtuse to compile as of this writing (7 Dec 2023).  So here, we've just brought in the bare minimum subset that is used in Sapling.

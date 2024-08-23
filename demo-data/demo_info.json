@@ -1,0 +1,34 @@
+{
+  "args": "../build/relwithdebinfo/sapling --seed 1 -n 10 --exp-pop-n0 6.0 --exp-pop-g 10 --t0 2024-07-31 --min-tip-t 2024-01-01 --max-tip-t 2024-07-31 --hky-kappa 5.0 --hky-pi-A 0.3 --hky-pi-C 0.18 --hky-pi-G 0.20 --hky-pi-T 0.32 --mu 0.1 -L 10 --out-info demo_info.json --out-newick demo_tree.nwk --out-fasta demo.fasta --out-maple demo.maple",
+  "num_sites": 10,
+  "pop_model": {
+    "g": 10.0,
+    "n0": 6.0,
+    "type": "exp"
+  },
+  "sampling_strategy": {
+    "max_tip_t": "2024-07-31",
+    "min_tip_t": "2024-01-01",
+    "num_samples": 10
+  },
+  "sapling_build_number": -2,
+  "sapling_commit": "467948f+<uncommitted changes>",
+  "sapling_version": "0.0.1+<unreleased changes>",
+  "seed": 1,
+  "subst_model": {
+    "kappa": 5.0,
+    "mu": 0.1,
+    "pi": [
+      0.3,
+      0.18,
+      0.2,
+      0.32
+    ],
+    "type": "hky"
+  },
+  "t0": "2024-07-31",
+  "tree_stats": {
+    "num_mutations": 1,
+    "total_branch_length": 2.0346429590567365
+  }
+}
