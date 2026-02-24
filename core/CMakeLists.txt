@@ -2,6 +2,7 @@ add_library(sapling_core
   # Source files in alphabetical order
   estd.h
   coal_sim.h coal_sim.cpp
+  dates.h dates.cpp
   distributions.h
   evo_hky.h evo_hky.cpp
   evo_model.h evo_model.cpp
@@ -25,6 +26,7 @@ target_link_libraries(sapling_core
   absl::random_random
   absl::random_bit_gen_ref
   absl::str_format
+  absl::time
   )
 
 target_include_directories(sapling_core INTERFACE .)

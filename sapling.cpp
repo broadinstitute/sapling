@@ -11,6 +11,7 @@
 #include "nlohmann/json.hpp"
 
 #include "coal_sim.h"
+#include "dates.h"
 #include "pop_model.h"
 #include "tree.h"
 #include "version.h"
@@ -24,20 +25,6 @@ namespace sapling {
 auto fatal(std::string_view msg) -> void {
   std::cerr << "ERROR: " << msg << "\n";
   std::exit(EXIT_FAILURE);
-}
-
-auto parse_iso_date(std::string_view iso_date_str, const absl::Time& epoch) -> double {
-  auto d = absl::Time{};
-  auto err = std::string{};
-  if (not absl::ParseTime("%Y-%m-%d", iso_date_str, &d, &err)) {
-    fatal(absl::StrFormat("Badly formatted ISO date: %s (error: %s)", iso_date_str, err));
-  }
-  return absl::ToDoubleHours(d - epoch) / 24.0 / 365.0;
-}
-
-auto to_iso_date(double t, const absl::Time& epoch) -> std::string {
-  auto abs_time = absl::Time{epoch + absl::Hours(t * 24.0 * 365.0 + 1e-5)};  // +1e-5 to avoid roundoff
-  return absl::FormatTime("%Y-%m-%d", abs_time, absl::UTCTimeZone());
 }
 
 
@@ -303,6 +290,9 @@ auto process_args(int argc, char** argv) -> Options {
     
   } catch (cxxopts::exceptions::exception& x) {
     std::cerr << "ERROR: " << x.what() << "\n" << options.help() << "\n";
+    std::exit(EXIT_FAILURE);
+  } catch (std::exception& x) {
+    std::cerr << "ERROR: " << x.what() << "\n";
     std::exit(EXIT_FAILURE);
   }
 }
