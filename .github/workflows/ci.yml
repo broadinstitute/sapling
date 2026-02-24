@@ -1,0 +1,160 @@
+name: CI
+
+on:
+  push:
+    branches: ['**']
+    tags: ['*']
+  pull_request:
+    branches: [main]
+
+# Minimal permissions by default - jobs expand as needed
+permissions:
+  contents: read
+
+env:
+  CONAN_VERSION: '1.65.0'
+
+jobs:
+  build:
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: ubuntu-latest
+            arch: x86_64
+            artifact_suffix: linux-x86_64
+            static_linking: true
+          - os: macos-14
+            arch: arm64
+            artifact_suffix: macos-arm64
+            static_linking: false
+
+    runs-on: ${{ matrix.os }}
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          submodules: recursive
+          fetch-depth: 2
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+
+      - name: Install system dependencies (Linux)
+        if: runner.os == 'Linux'
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y build-essential cmake
+
+      - name: Install system dependencies (macOS)
+        if: runner.os == 'macOS'
+        run: |
+          brew install cmake
+
+      - name: Cache pip
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cache/pip
+            ~/Library/Caches/pip
+          key: ${{ runner.os }}-pip-conan-${{ env.CONAN_VERSION }}
+
+      - name: Cache Conan
+        uses: actions/cache@v4
+        with:
+          path: ~/.conan
+          key: ${{ runner.os }}-${{ matrix.arch }}-conan-${{ hashFiles('conanfile.txt') }}-v1
+          restore-keys: |
+            ${{ runner.os }}-${{ matrix.arch }}-conan-
+
+      - name: Install Conan
+        run: |
+          python -m pip install --upgrade pip
+          pip install 'conan==${{ env.CONAN_VERSION }}'
+
+      - name: Configure Conan profile (Linux)
+        if: runner.os == 'Linux'
+        run: |
+          conan profile new default --detect
+          conan profile update settings.compiler.libcxx=libstdc++11 default
+
+      - name: Configure Conan profile (macOS)
+        if: runner.os == 'macOS'
+        run: |
+          conan profile new default --detect
+
+      - name: Build (with static linking)
+        if: matrix.static_linking
+        run: |
+          mkdir -p build/release && cd build/release
+          conan install ../..
+          cmake ../.. -DCMAKE_BUILD_TYPE=Release \
+            -DCMAKE_FIND_LIBRARY_SUFFIXES=".a" \
+            -DBUILD_SHARED_LIBS=OFF \
+            -DCMAKE_EXE_LINKER_FLAGS="-static"
+          make -j$(nproc)
+
+      - name: Build (without static linking)
+        if: ${{ !matrix.static_linking }}
+        run: |
+          mkdir -p build/release && cd build/release
+          conan install ../..
+          cmake ../.. -DCMAKE_BUILD_TYPE=Release
+          make -j$(nproc)
+
+      - name: Verify binary
+        run: ./build/release/sapling --help
+
+      - name: Run tests
+        run: |
+          ./build/release/tests/tests --gtest_output=xml:test-results.xml
+
+      - name: Upload test results
+        uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: test-results-${{ matrix.artifact_suffix }}
+          path: test-results.xml
+          if-no-files-found: ignore
+
+      - name: Upload artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: sapling-${{ matrix.artifact_suffix }}
+          path: build/release/sapling
+          if-no-files-found: error
+
+  release-artifacts:
+    needs: [build]
+    runs-on: ubuntu-latest
+    if: startsWith(github.ref, 'refs/tags/')
+    permissions:
+      contents: write
+
+    steps:
+      - name: Download all artifacts
+        uses: actions/download-artifact@v4
+        with:
+          pattern: sapling-*
+          path: artifacts
+
+      - name: Make binaries executable
+        run: |
+          chmod +x artifacts/sapling-*/sapling
+
+      - name: Create release tarballs
+        run: |
+          cd artifacts
+          for suffix in linux-x86_64 macos-arm64; do
+            tar -czvf "sapling-${suffix}.tar.gz" -C "sapling-${suffix}" .
+          done
+          ls -la *.tar.gz
+
+      - name: Upload release assets
+        uses: softprops/action-gh-release@v2
+        with:
+          files: artifacts/*.tar.gz
+          draft: true
