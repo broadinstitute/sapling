@@ -28,11 +28,10 @@ auto parse_tip_file(std::istream& is, const absl::Time& t0)
           "Line %d: expected 'Name|YYYY-MM-DD', but no '|' found: %s", line_num, line));
     }
 
-    auto name = line.substr(0, pos);
     auto date_str = std::string_view{line}.substr(pos + 1);
 
     auto t = parse_iso_date(date_str, t0);  // throws on bad date
-    result.emplace_back(std::move(name), t);
+    result.emplace_back(std::move(line), t);
   }
 
   if (result.empty()) {

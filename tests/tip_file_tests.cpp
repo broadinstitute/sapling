@@ -23,9 +23,9 @@ TEST(Tip_file_test, valid_multiple_tips) {
   auto tips = parse_tip_file(is, t0);
 
   ASSERT_EQ(std::ssize(tips), 3);
-  EXPECT_EQ(tips[0].first, "Alpha");
-  EXPECT_EQ(tips[1].first, "Beta");
-  EXPECT_EQ(tips[2].first, "Gamma");
+  EXPECT_EQ(tips[0].first, "Alpha|2024-01-15");
+  EXPECT_EQ(tips[1].first, "Beta|2024-03-22");
+  EXPECT_EQ(tips[2].first, "Gamma|2024-07-01");
   // All dates are before the epoch, so times should be negative
   EXPECT_LT(tips[0].second, tips[1].second);
   EXPECT_LT(tips[1].second, tips[2].second);
@@ -39,7 +39,7 @@ TEST(Tip_file_test, single_tip) {
   auto tips = parse_tip_file(is, t0);
 
   ASSERT_EQ(std::ssize(tips), 1);
-  EXPECT_EQ(tips[0].first, "OnlyTip");
+  EXPECT_EQ(tips[0].first, "OnlyTip|2024-07-31");
   EXPECT_THAT(tips[0].second, testing::DoubleNear(0.0, 1e-6));
 }
 
@@ -50,8 +50,8 @@ TEST(Tip_file_test, empty_lines_skipped) {
   auto tips = parse_tip_file(is, t0);
 
   ASSERT_EQ(std::ssize(tips), 2);
-  EXPECT_EQ(tips[0].first, "Alpha");
-  EXPECT_EQ(tips[1].first, "Beta");
+  EXPECT_EQ(tips[0].first, "Alpha|2024-01-15");
+  EXPECT_EQ(tips[1].first, "Beta|2024-03-22");
 }
 
 TEST(Tip_file_test, missing_pipe) {
@@ -84,13 +84,13 @@ TEST(Tip_file_test, only_blank_lines) {
 
 TEST(Tip_file_test, name_with_multiple_pipes) {
   auto t0 = test_epoch();
-  // Split on the *last* pipe, so "A|B" is the name and "2024-07-31" is the date
+  // Split on the *last* pipe to extract the date; full line is preserved as the name
   auto is = std::istringstream{"A|B|2024-07-31\n"};
 
   auto tips = parse_tip_file(is, t0);
 
   ASSERT_EQ(std::ssize(tips), 1);
-  EXPECT_EQ(tips[0].first, "A|B");
+  EXPECT_EQ(tips[0].first, "A|B|2024-07-31");
   EXPECT_THAT(tips[0].second, testing::DoubleNear(0.0, 1e-6));
 }
 
@@ -101,7 +101,7 @@ TEST(Tip_file_test, name_with_spaces) {
   auto tips = parse_tip_file(is, t0);
 
   ASSERT_EQ(std::ssize(tips), 1);
-  EXPECT_EQ(tips[0].first, "Sample One");
+  EXPECT_EQ(tips[0].first, "Sample One|2024-07-31");
 }
 
 }  // namespace sapling
