@@ -8,6 +8,7 @@ add_executable(tests
   sequence_overlay_tests.cpp
   sequence_tests.cpp
   tests_main.cpp
+  tip_file_tests.cpp
   tree_tests.cpp
   )
 

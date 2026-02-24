@@ -42,6 +42,12 @@ These are the most important conventions from CONTRIBUTING.md that you MUST foll
 
 ---
 
+## Planning
+
+Feature plans go in `claude_plans/` with filenames of the form `YYYY-MM-DD-BriefFeatureDescription.md` (e.g., `2026-02-24-SiteRateHeterogeneity.md`).  Use plan mode to draft these before implementing a feature.
+
+---
+
 ## Directory layout
 
 ```
@@ -63,6 +69,8 @@ sapling/
     coal_sim.h / .cpp         Coalescent simulator: pop model + tip times -> Phylo_tree
     evo_model.h / .cpp        Site_evo_model (mu, pi_a, q_ab), Global_evo_model (per-site rates)
     evo_hky.h / .cpp          HKY substitution model -> derives Site_evo_model using Eigen
+    dates.h / .cpp            ISO date parsing and formatting (parse_iso_date, to_iso_date)
+    tip_file.h / .cpp         Tip file parser (Name|YYYY-MM-DD format)
     distributions.h           Bounded_exponential_distribution (used by Exp_pop_model::sample)
     estd.h                    is_debug_enabled flag
     CMakeLists.txt            Builds sapling_core library
@@ -74,8 +82,11 @@ sapling/
     sequence_overlay_tests.cpp  Overlay creation, delta tracking, materialize
     mutations_tests.cpp       Mutation insertion, on_branch lookup, erase_mutation
     pop_model_tests.cpp       Const/Exp population model functions, intensity, inverse_intensity
+    dates_tests.cpp           ISO date parsing/formatting round-trips
+    tip_file_tests.cpp        Tip file parsing (valid/invalid inputs, edge cases)
     CMakeLists.txt
 
+  claude_plans/             Dated feature plans (YYYY-MM-DD-BriefFeatureDescription.md)
   demo-data/                Reference output files for a sample run
   third-party/              Git submodules: abseil-cpp, cxxopts, cppcoro
 ```
@@ -123,6 +134,9 @@ All orchestrated in `main()` in `sapling.cpp`:
    (uniform for const, bounded-exponential for exp growth).
    Each time is rounded to the nearest ISO date.
    -> vector<double> tip_times
+   Alternatively, if --tip-file is given, parse_tip_file() reads explicit
+   tip names and dates from a file (format: Name|YYYY-MM-DD, one per line).
+   -> vector<pair<string, double>> with names preserved for step 5
 
 3. coal_sim(pop_model, tip_times, rng)
    Build a coalescent tree backwards in time:
@@ -141,8 +155,9 @@ All orchestrated in `main()` in `sapling.cpp`:
 4. ladderize_tree(tree)
    Post-order pass: swap children so the subtree with fewer descendants is on the left.
 
-5. name_nodes(tree, t0)
-   Index-order pass: tips get "TIP_k|YYYY-MM-DD", inner nodes get "NODE_k|YYYY-MM-DD".
+5. name_nodes(tree, t0, tip_names={})
+   Index-order pass: tips get "TIP_k|YYYY-MM-DD" (or names from tip file if provided),
+   inner nodes get "NODE_k|YYYY-MM-DD".
 
 6. gen_random_sequence(num_sites, pi_a, rng)
    Draw each site i.i.d. from the stationary base frequencies pi_a.
@@ -202,6 +217,13 @@ sapling.cpp
   |       |       +---> mutations.h
   |       +---> pop_model.{h,cpp}
   |               +---> distributions.h
+  |
+  +---> dates.{h,cpp}          (ISO date parsing / formatting)
+  |       +---> absl::time
+  |
+  +---> tip_file.{h,cpp}       (tip file parser: Name|YYYY-MM-DD)
+  |       +---> dates.h
+  |       +---> absl::time
   |
   +---> evo_hky.{h,cpp}        (HKY model -> Site_evo_model)
   |       +---> evo_model.h

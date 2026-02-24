@@ -11,6 +11,7 @@ add_library(sapling_core
   pop_model.h pop_model.cpp
   sequence.h
   sequence_overlay.h
+  tip_file.h tip_file.cpp
   tree.h
   )
 

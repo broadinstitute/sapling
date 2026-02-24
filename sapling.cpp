@@ -13,6 +13,7 @@
 #include "coal_sim.h"
 #include "dates.h"
 #include "pop_model.h"
+#include "tip_file.h"
 #include "tree.h"
 #include "version.h"
 #include "evo_hky.h"
@@ -37,6 +38,7 @@ struct Options {
 
   // Sampling strategy
   std::unique_ptr<Pop_model> pop_model;
+  std::optional<std::string> tip_file;
   int num_samples;
   double min_tip_t, max_tip_t;
 
@@ -87,6 +89,8 @@ auto process_args(int argc, char** argv) -> Options {
       ("min-tip-t", "Earliest possible tip date (e.g., 2019-06-15; default: 1M years before t0)",
        cxxopts::value<std::string>())
       ("max-tip-t", "Latest possible tip date (e.g., 2020-01-01; default: t0)",
+       cxxopts::value<std::string>())
+      ("tip-file", "File with tip names and dates, one per line (format: Name|YYYY-MM-DD)",
        cxxopts::value<std::string>())
       ;
 
@@ -195,20 +199,37 @@ auto process_args(int argc, char** argv) -> Options {
 
     // Sampling strategy
 
-    if (not opts.count("n")) {
-      fatal("Number of samples (-n) not specified");
-    }
-    auto num_samples = opts["n"].as<int>();
-    if (num_samples <= 0) {
-      fatal("Number of samples (-n) should be positive");
-    }
+    auto tip_file = std::optional<std::string>{};
+    auto num_samples = 0;
     auto min_tip_t = -1e6;
-    if (opts.count("min-tip-t")) {
-      min_tip_t = parse_iso_date(opts["min-tip-t"].as<std::string>(), t0);
-    }
     auto max_tip_t = 0.0;
-    if (opts.count("max-tip-t")) {
-      max_tip_t = parse_iso_date(opts["max-tip-t"].as<std::string>(), t0);
+
+    if (opts.count("tip-file")) {
+      // --tip-file is mutually exclusive with -n, --min-tip-t, --max-tip-t
+      if (opts.count("n")) {
+        fatal("Cannot specify both --tip-file and --num-samples (-n)");
+      }
+      if (opts.count("min-tip-t")) {
+        fatal("Cannot specify both --tip-file and --min-tip-t");
+      }
+      if (opts.count("max-tip-t")) {
+        fatal("Cannot specify both --tip-file and --max-tip-t");
+      }
+      tip_file = opts["tip-file"].as<std::string>();
+    } else {
+      if (not opts.count("n")) {
+        fatal("Number of samples (-n) not specified");
+      }
+      num_samples = opts["n"].as<int>();
+      if (num_samples <= 0) {
+        fatal("Number of samples (-n) should be positive");
+      }
+      if (opts.count("min-tip-t")) {
+        min_tip_t = parse_iso_date(opts["min-tip-t"].as<std::string>(), t0);
+      }
+      if (opts.count("max-tip-t")) {
+        max_tip_t = parse_iso_date(opts["max-tip-t"].as<std::string>(), t0);
+      }
     }
 
     // Substitution model
@@ -274,6 +295,7 @@ auto process_args(int argc, char** argv) -> Options {
       .seed = seed,
       .t0 = t0,
       .pop_model = std::move(pop_model),
+      .tip_file = std::move(tip_file),
       .num_samples = num_samples,
       .min_tip_t = min_tip_t,
       .max_tip_t = max_tip_t,
@@ -329,11 +351,18 @@ auto dump_info(const Options& opts, const Phylo_tree& tree) -> std::string {
     CHECK(false) << "Unknown population model type: " << *opts.pop_model;
   }
 
-  auto sampling_j = json{
-    {"num_samples", opts.num_samples},
-    {"min_tip_t", to_iso_date(opts.min_tip_t, opts.t0)},
-    {"max_tip_t", to_iso_date(opts.max_tip_t, opts.t0)}
-  };
+  auto sampling_j = json{};
+  if (opts.tip_file.has_value()) {
+    sampling_j = json{
+      {"tip_file", opts.tip_file.value()}
+    };
+  } else {
+    sampling_j = json{
+      {"num_samples", opts.num_samples},
+      {"min_tip_t", to_iso_date(opts.min_tip_t, opts.t0)},
+      {"max_tip_t", to_iso_date(opts.max_tip_t, opts.t0)}
+    };
+  }
 
   auto subst_j = json{
     {"type", "hky"},
@@ -399,16 +428,22 @@ auto ladderize_tree(Phylo_tree& tree) -> void {
   }
 }
 
-auto name_nodes(Phylo_tree& tree, const absl::Time& t0) -> void {
+auto name_nodes(Phylo_tree& tree, const absl::Time& t0,
+                const std::vector<std::string>& tip_names = {}) -> void {
   auto num_nodes = static_cast<Node_index>(std::ssize(tree));
   auto num_tips = (num_nodes + 1) / 2;
-  
+
   auto next_tip_id = 1;
   auto next_inner_node_id = num_tips + 1;
 
   for (const auto& node : index_order_traversal(tree)) {
     if (tree.at(node).is_tip()) {
-      tree.at(node).name = absl::StrFormat("TIP_%d|%s", next_tip_id, to_iso_date(tree.at(node).t, t0));
+      if (not tip_names.empty()) {
+        // Tip nodes occupy indices 0..num_tips-1 in the tree, matching the order in tip_names
+        tree.at(node).name = tip_names.at(node);
+      } else {
+        tree.at(node).name = absl::StrFormat("TIP_%d|%s", next_tip_id, to_iso_date(tree.at(node).t, t0));
+      }
       ++next_tip_id;
     } else {
       tree.at(node).name = absl::StrFormat("NODE_%d|%s", next_inner_node_id, to_iso_date(tree.at(node).t, t0));
@@ -665,11 +700,22 @@ auto main(int argc, char** argv) -> int {
   auto rng = std::mt19937{};
   rng.seed(opts.seed);
 
-  auto tip_times = choose_tip_times(*opts.pop_model, opts.num_samples, opts.min_tip_t, opts.max_tip_t, opts.t0, rng);
+  auto tip_names = std::vector<std::string>{};
+  auto tip_times = std::vector<double>{};
+
+  if (opts.tip_file.has_value()) {
+    auto tips = parse_tip_file(opts.tip_file.value(), opts.t0);
+    for (auto& [name, t] : tips) {
+      tip_names.push_back(std::move(name));
+      tip_times.push_back(t);
+    }
+  } else {
+    tip_times = choose_tip_times(*opts.pop_model, opts.num_samples, opts.min_tip_t, opts.max_tip_t, opts.t0, rng);
+  }
 
   auto tree = coal_sim(*opts.pop_model, tip_times, rng);
   ladderize_tree(tree);
-  name_nodes(tree, opts.t0);
+  name_nodes(tree, opts.t0, tip_names);
   tree.ref_sequence = gen_random_sequence(opts.num_sites, opts.hky_pi_a, rng);
 
   auto hky = Hky_model{};
