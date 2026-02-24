@@ -691,72 +691,77 @@ auto write_to(const std::optional<std::string> maybe_filename, std::string_view 
 
 auto main(int argc, char** argv) -> int {
   using namespace sapling;
-  
+
   absl::InitializeLog();
 
-  auto opts = process_args(argc, argv);
-  std::cerr << "Seed: " << opts.seed << "\n";
+  try {
+    auto opts = process_args(argc, argv);
+    std::cerr << "Seed: " << opts.seed << "\n";
 
-  auto rng = std::mt19937{};
-  rng.seed(opts.seed);
+    auto rng = std::mt19937{};
+    rng.seed(opts.seed);
 
-  auto tip_names = std::vector<std::string>{};
-  auto tip_times = std::vector<double>{};
+    auto tip_names = std::vector<std::string>{};
+    auto tip_times = std::vector<double>{};
 
-  if (opts.tip_file.has_value()) {
-    auto tips = parse_tip_file(opts.tip_file.value(), opts.t0);
-    for (auto& [name, t] : tips) {
-      tip_names.push_back(std::move(name));
-      tip_times.push_back(t);
+    if (opts.tip_file.has_value()) {
+      auto tips = parse_tip_file(opts.tip_file.value(), opts.t0);
+      for (auto& [name, t] : tips) {
+        tip_names.push_back(std::move(name));
+        tip_times.push_back(t);
+      }
+    } else {
+      tip_times = choose_tip_times(*opts.pop_model, opts.num_samples, opts.min_tip_t, opts.max_tip_t, opts.t0, rng);
     }
-  } else {
-    tip_times = choose_tip_times(*opts.pop_model, opts.num_samples, opts.min_tip_t, opts.max_tip_t, opts.t0, rng);
+
+    auto tree = coal_sim(*opts.pop_model, tip_times, rng);
+    ladderize_tree(tree);
+    name_nodes(tree, opts.t0, tip_names);
+    tree.ref_sequence = gen_random_sequence(opts.num_sites, opts.hky_pi_a, rng);
+
+    auto hky = Hky_model{};
+    hky.mu = opts.mu;    // per site, per year
+    hky.kappa = opts.hky_kappa;
+    hky.pi_a = opts.hky_pi_a;
+
+    auto evo = make_single_partition_global_evo_model(opts.num_sites);
+    evo.site_evo_model = hky.derive_site_evo_model();
+
+    // TODO: Fill in evo.nu_l[l] with something other than 1.0
+
+    simulate_mutations(tree, evo, rng);
+
+    write_to(opts.out_info_filename, "Info", [&](auto& os) {
+      os << dump_info(opts, tree) << "\n";
+    });
+
+    write_to(opts.out_newick_filename, "Newick", [&](auto& os) {
+      output_newick_tree(os, tree, opts.t0, false);
+    });
+
+    write_to(opts.out_nexus_filename, "Nexus", [&](auto& os) {
+      os << "#NEXUS\n"
+         << "\n"
+         << "Begin trees;\n"
+         << "tree TREE1 = ";
+      output_newick_tree(os, tree, opts.t0, true);
+      os << "\nEnd;\n";
+    });
+
+    write_to(opts.out_fasta_filename, "FASTA", [&](auto& os) {
+      output_fasta(os, tree);
+    });
+
+    write_to(opts.out_maple_filename, "Maple", [&](auto& os) {
+      output_maple(os, tree);
+    });
+
+    std::cerr << "Total number of mutations: " << tree.mutations.size() << "\n";
+    std::cerr << "Total branch length: " << calc_total_branch_length(tree) << " years\n";
+
+    return EXIT_SUCCESS;
+  } catch (const std::exception& e) {
+    std::cerr << "ERROR: " << e.what() << "\n";
+    return EXIT_FAILURE;
   }
-
-  auto tree = coal_sim(*opts.pop_model, tip_times, rng);
-  ladderize_tree(tree);
-  name_nodes(tree, opts.t0, tip_names);
-  tree.ref_sequence = gen_random_sequence(opts.num_sites, opts.hky_pi_a, rng);
-
-  auto hky = Hky_model{};
-  hky.mu = opts.mu;    // per site, per year
-  hky.kappa = opts.hky_kappa;
-  hky.pi_a = opts.hky_pi_a;
-  
-  auto evo = make_single_partition_global_evo_model(opts.num_sites);
-  evo.site_evo_model = hky.derive_site_evo_model();
-
-  // TODO: Fill in evo.nu_l[l] with something other than 1.0
-  
-  simulate_mutations(tree, evo, rng);
-  
-  write_to(opts.out_info_filename, "Info", [&](auto& os) {
-    os << dump_info(opts, tree) << "\n";
-  });
-
-  write_to(opts.out_newick_filename, "Newick", [&](auto& os) {
-    output_newick_tree(os, tree, opts.t0, false);
-  });
-
-  write_to(opts.out_nexus_filename, "Nexus", [&](auto& os) {
-    os << "#NEXUS\n"
-       << "\n"
-       << "Begin trees;\n"
-       << "tree TREE1 = ";
-    output_newick_tree(os, tree, opts.t0, true);
-    os << "\nEnd;\n";
-  });
-
-  write_to(opts.out_fasta_filename, "FASTA", [&](auto& os) {
-    output_fasta(os, tree);
-  });
-
-  write_to(opts.out_maple_filename, "Maple", [&](auto& os) {
-    output_maple(os, tree);
-  });
-
-  std::cerr << "Total number of mutations: " << tree.mutations.size() << "\n";
-  std::cerr << "Total branch length: " << calc_total_branch_length(tree) << " years\n";
-  
-  return EXIT_SUCCESS;
 }
