@@ -299,6 +299,17 @@ cd build/debug && ctest
 
 For a release build, replace `Debug` with `Release` and use `build/release` instead.
 
+## Releasing a new version
+
+In the top-level `CMakeLists.txt`, update three variables near the top of the file:
+
+1. Commit all final changes and note the commit hash X.
+2. Bump `VERSION` (in the `project(sapling VERSION ...)` line) and `BUILD_NUMBER`.
+3. Set `BUILD_PREV_GIT_HASH` to X.
+4. Commit the `CMakeLists.txt` change and push.
+5. Tag the commit: `git tag ${VERSION} && git push origin ${VERSION}`.
+6. Compile and distribute the release artifacts.
+
 ---
 
 ## Dependencies
