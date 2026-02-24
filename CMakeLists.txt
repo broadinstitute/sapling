@@ -32,7 +32,9 @@ add_library(common INTERFACE)
 # Set up compiler and linker flags
 target_compile_options(common INTERFACE -Wall -Wextra -Werror)  # Treat all warnings as errors
 add_compile_options(-fno-omit-frame-pointer -mno-omit-leaf-frame-pointer)  # Sane stack traces
-add_compile_options(-ffast-math -msse3)
+if(CMAKE_SYSTEM_PROCESSOR MATCHES "x86_64|AMD64")
+  add_compile_options(-msse3)
+endif()
 # add_compile_options(
 #   -fsanitize=address
 #   -fno-optimize-sibling-calls
