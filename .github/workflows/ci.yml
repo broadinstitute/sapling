@@ -49,8 +49,8 @@ jobs:
           sudo apt-get update
           sudo apt-get install -y build-essential cmake
 
-      # Xcode 15's AppleClang doesn't support 'auto' in template arguments (C++20);
-      # Xcode 16 is needed for full C++20 support.
+      # Xcode 15's AppleClang lacks full C++20 support (e.g., construct_at);
+      # Xcode 16 is required.
       - name: Select Xcode 16 (macOS)
         if: runner.os == 'macOS'
         run: |
