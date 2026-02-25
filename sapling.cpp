@@ -329,6 +329,16 @@ auto calc_total_branch_length(const Phylo_tree& tree) -> double {
   return T;
 }
 
+auto calc_tree_height(const Phylo_tree& tree) -> double {
+  auto max_tip_t = -std::numeric_limits<double>::infinity();
+  for (const auto& node : index_order_traversal(tree)) {
+    if (tree.at(node).is_tip()) {
+      max_tip_t = std::max(max_tip_t, tree.at(node).t);
+    }
+  }
+  return max_tip_t - tree.at_root().t;
+}
+
 auto dump_info(const Options& opts, const Phylo_tree& tree) -> std::string {
 
   using enum Real_seq_letter;
@@ -386,7 +396,8 @@ auto dump_info(const Options& opts, const Phylo_tree& tree) -> std::string {
         {"num_mutations", std::ssize(tree.mutations)},
         {"total_branch_length", calc_total_branch_length(tree)},
         {"t_mrca", tree.at_root().t},
-        {"t_mrca_date", to_iso_date(tree.at_root().t, opts.t0)}}}
+        {"t_mrca_date", to_iso_date(tree.at_root().t, opts.t0)},
+        {"tree_height", calc_tree_height(tree)}}}
   };
   return result.dump(2);
 }
