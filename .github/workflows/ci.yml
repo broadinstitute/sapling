@@ -49,6 +49,14 @@ jobs:
           sudo apt-get update
           sudo apt-get install -y build-essential cmake
 
+      # Xcode 15's AppleClang doesn't support 'auto' in template arguments (C++20);
+      # Xcode 16 is needed for full C++20 support.
+      - name: Select Xcode 16 (macOS)
+        if: runner.os == 'macOS'
+        run: |
+          sudo xcode-select -s /Applications/Xcode_16.2.app/Contents/Developer
+          xcodebuild -version
+
       - name: Install system dependencies (macOS)
         if: runner.os == 'macOS'
         run: |
@@ -97,7 +105,7 @@ jobs:
             -DCMAKE_FIND_LIBRARY_SUFFIXES=".a" \
             -DBUILD_SHARED_LIBS=OFF \
             -DCMAKE_EXE_LINKER_FLAGS="-static"
-          make -j$(nproc)
+          make -j$(getconf _NPROCESSORS_ONLN)
 
       - name: Build (without static linking)
         if: ${{ !matrix.static_linking }}
@@ -105,7 +113,7 @@ jobs:
           mkdir -p build/release && cd build/release
           conan install ../..
           cmake ../.. -DCMAKE_BUILD_TYPE=Release
-          make -j$(nproc)
+          make -j$(getconf _NPROCESSORS_ONLN)
 
       - name: Verify binary
         run: ./build/release/sapling --help
