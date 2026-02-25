@@ -78,12 +78,14 @@ jobs:
       - name: Configure Conan profile (Linux)
         if: runner.os == 'Linux'
         run: |
+          rm -f ~/.conan/profiles/default
           conan profile new default --detect
           conan profile update settings.compiler.libcxx=libstdc++11 default
 
       - name: Configure Conan profile (macOS)
         if: runner.os == 'macOS'
         run: |
+          rm -f ~/.conan/profiles/default
           conan profile new default --detect
 
       - name: Build (with static linking)
