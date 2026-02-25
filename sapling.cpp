@@ -384,7 +384,9 @@ auto dump_info(const Options& opts, const Phylo_tree& tree) -> std::string {
     {"num_sites", opts.num_sites},
     {"tree_stats", {
         {"num_mutations", std::ssize(tree.mutations)},
-        {"total_branch_length", calc_total_branch_length(tree)}}}
+        {"total_branch_length", calc_total_branch_length(tree)},
+        {"t_mrca", tree.at_root().t},
+        {"t_mrca_date", to_iso_date(tree.at_root().t, opts.t0)}}}
   };
   return result.dump(2);
 }
