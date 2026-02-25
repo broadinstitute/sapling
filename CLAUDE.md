@@ -39,6 +39,11 @@ These are the most important conventions from CONTRIBUTING.md that you MUST foll
 ## Git Conventions
 
 1. **Never amend pushed commits** - Always create fresh commits. Do not use `git commit --amend` or `git rebase` on commits that have already been pushed.
+2. **Feature branches** - Develop each new feature in a separate branch and git worktree, so multiple features can be developed in parallel. Create a worktree with:
+   ```bash
+   git worktree add ../sapling-FeatureName feature/FeatureName
+   ```
+   This creates a branch `feature/FeatureName` and checks it out in `../sapling-FeatureName`. When done, open a PR to merge into `main`.
 
 ---
 
