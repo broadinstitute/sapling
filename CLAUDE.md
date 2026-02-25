@@ -43,13 +43,20 @@ These are the most important conventions from CONTRIBUTING.md that you MUST foll
    ```bash
    git worktree add -b feature/FeatureName ../sapling-FeatureName main
    ```
-   This creates a branch `feature/FeatureName` and checks it out in `../sapling-FeatureName`. When done, open a PR to merge into `main`.
+   This creates a branch `feature/FeatureName` and checks it out in `../sapling-FeatureName`. Then initialize git submodules in the new worktree:
+   ```bash
+   cd ../sapling-FeatureName
+   git submodule update --init
+   ```
+   When done, open a PR to merge into `main`.
 
 ---
 
 ## Planning
 
 Feature plans go in `claude_plans/` with filenames of the form `YYYY-MM-DD-BriefFeatureDescription.md` (e.g., `2026-02-24-SiteRateHeterogeneity.md`).  Use plan mode to draft these before implementing a feature.
+
+**Important:** Always write the plan to a file in `claude_plans/`, not just to the ephemeral plan mode file.  This ensures the plan is visible for direct editing, persists across sessions, and is committed alongside the code.  When in plan mode, write your plan to `claude_plans/` first, then reference it from the plan mode file.
 
 ---
 
