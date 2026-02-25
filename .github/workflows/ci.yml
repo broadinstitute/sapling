@@ -154,20 +154,17 @@ jobs:
           pattern: sapling-*
           path: artifacts
 
-      - name: Make binaries executable
+      - name: Prepare release binaries
         run: |
-          chmod +x artifacts/sapling-*/sapling
-
-      - name: Create release tarballs
-        run: |
-          cd artifacts
+          mkdir -p release
           for suffix in linux-x86_64 macos-arm64; do
-            tar -czvf "sapling-${suffix}.tar.gz" -C "sapling-${suffix}" .
+            cp "artifacts/sapling-${suffix}/sapling" "release/sapling-${suffix}"
+            chmod +x "release/sapling-${suffix}"
           done
-          ls -la *.tar.gz
+          ls -la release/
 
       - name: Upload release assets
         uses: softprops/action-gh-release@v2
         with:
-          files: artifacts/*.tar.gz
+          files: release/sapling-*
           draft: true
