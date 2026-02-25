@@ -49,14 +49,6 @@ jobs:
           sudo apt-get update
           sudo apt-get install -y build-essential cmake
 
-      # Xcode 15's AppleClang doesn't support 'auto' in template arguments (C++20);
-      # Xcode 16 is needed for full C++20 support.
-      - name: Select Xcode 16 (macOS)
-        if: runner.os == 'macOS'
-        run: |
-          sudo xcode-select -s /Applications/Xcode_16.2.app/Contents/Developer
-          xcodebuild -version
-
       - name: Install system dependencies (macOS)
         if: runner.os == 'macOS'
         run: |
@@ -90,14 +82,11 @@ jobs:
           conan profile new default --detect
           conan profile update settings.compiler.libcxx=libstdc++11 default
 
-      # Conan 1.x doesn't recognize Apple Clang 16; override to 15
-      # (header-only deps don't care about the exact compiler version)
       - name: Configure Conan profile (macOS)
         if: runner.os == 'macOS'
         run: |
           rm -f ~/.conan/profiles/default
           conan profile new default --detect
-          conan profile update settings.compiler.version=15 default
 
       - name: Build (with static linking)
         if: matrix.static_linking
