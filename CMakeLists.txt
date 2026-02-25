@@ -10,9 +10,9 @@ cmake_minimum_required(VERSION 3.17.5)
 # 4. Commit these changes to CMakeLists.txt and push (git push)
 # 5. Tag Git commit (git tag ${VERSION} && git push origin ${VERSION})
 # 6. Compile & distribute the release artifacts
-project(sapling VERSION 0.1.4)
-set(BUILD_NUMBER 5)
-set(BUILD_PREV_GIT_HASH bf2eb77)
+project(sapling VERSION 0.1.5)
+set(BUILD_NUMBER 6)
+set(BUILD_PREV_GIT_HASH fa6b2f4)
 
 set(CMAKE_CXX_STANDARD 20)
 set(CMAKE_CXX_STANDARD_REQUIRED YES)
