@@ -90,11 +90,14 @@ jobs:
           conan profile new default --detect
           conan profile update settings.compiler.libcxx=libstdc++11 default
 
+      # Conan 1.x doesn't recognize Apple Clang 16; override to 15
+      # (header-only deps don't care about the exact compiler version)
       - name: Configure Conan profile (macOS)
         if: runner.os == 'macOS'
         run: |
           rm -f ~/.conan/profiles/default
           conan profile new default --detect
+          conan profile update settings.compiler.version=15 default
 
       - name: Build (with static linking)
         if: matrix.static_linking
