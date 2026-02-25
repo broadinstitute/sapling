@@ -61,7 +61,7 @@ sapling/
   version.h / version.cpp.in   Version string (filled by CMake)
   CMakeLists.txt            Top-level build configuration
   CheckGit.cmake            Embeds git commit hash into version string
-  conanfile.txt             Conan 1.x dependency list
+  conanfile.txt             Conan 2.x dependency list
 
   core/                     Core library (sapling_core)
     tree.h                    Generic tree data structure + traversals
@@ -254,7 +254,7 @@ sapling.cpp
 ## Build system
 
 - **CMake** (C++20, `-Wall -Wextra -Werror -ffast-math -msse3`)
-- **Conan 1.65.0** for Eigen3 and Boost
+- **Conan 2.25** for Eigen3 and Boost
 - **FetchContent** for nlohmann/json and GoogleTest
 - **Git submodules** for abseil-cpp, cxxopts, cppcoro
 - Two build targets: `sapling_core` (static library) and `sapling` (executable linking `sapling_core` + nlohmann_json)
@@ -268,10 +268,9 @@ One-time setup (requires Python 3 for Conan):
 # Create a virtualenv if needed (e.g., Ubuntu >= 24.04)
 python3 -m venv delphy-venv && source delphy-venv/bin/activate
 
-# Install Conan 1.x (Conan 2.0 is not supported)
-pip3 install 'conan==1.65.0'
-conan profile new default --detect
-conan profile update settings.compiler.libcxx=libstdc++11 default
+# Install Conan 2.25
+pip3 install 'conan==2.25'
+conan profile detect
 
 # Check out git submodules
 git submodule update --init
@@ -280,10 +279,9 @@ git submodule update --init
 Build (from the repo root):
 
 ```bash
-mkdir -p build/debug && cd build/debug
-conan install ../..
-cmake ../.. -DCMAKE_BUILD_TYPE=Debug
-make -j 6
+conan install . --output-folder=build/debug --build=missing --settings=build_type=Debug
+cmake --preset conan-debug
+cmake --build --preset conan-debug
 ```
 
 This produces two executables in `build/debug`:
@@ -293,7 +291,7 @@ This produces two executables in `build/debug`:
 Run all tests:
 
 ```bash
-cd build/debug && tests/tests
+./build/debug/tests/tests
 ```
 
 Or via CTest:
@@ -302,7 +300,7 @@ Or via CTest:
 cd build/debug && ctest
 ```
 
-For a release build, replace `Debug` with `Release` and use `build/release` instead.
+For a release build, replace `debug` with `release` and `Debug` with `Release` in the commands above.
 
 ## Releasing a new version
 

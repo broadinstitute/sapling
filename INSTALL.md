@@ -6,15 +6,14 @@ python3 -m venv delphy-venv
 source delphy-venv/bin/activate
 ```
 
-Install Conan 1.65.0 (we do not yet support using Conan 2.0):
+Install Conan 2.25:
 ```
-pip3 install 'conan==1.65.0'   # See https://docs.conan.io/en/latest/installation.html for details
+pip3 install 'conan==2.25'   # See https://docs.conan.io/2/installation.html for details
 ```
 
-Make some config adjustment to your Conan profile (see https://docs.conan.io/en/latest/getting_started.html)
+Set up your Conan profile (see https://docs.conan.io/2/tutorial/consuming_packages/build_simple_cmake_project.html)
 ```
-conan profile new default --detect
-conan profile update settings.compiler.libcxx=libstdc++11 default
+conan profile detect
 ```
 
 Make sure git submodules are checked out in the `third-party` directory:
@@ -22,16 +21,20 @@ Make sure git submodules are checked out in the `third-party` directory:
 git submodule update --init
 ```
 
-Set up build directory and install dependencies
+Set up build directory and install dependencies:
 ```
-mkdir -p build/debug && cd build/debug
-conan install ../..
+# For Debug binaries
+conan install . --output-folder=build/debug --build=missing --settings=build_type=Debug
+cmake --preset conan-debug
+
+# For Release binaries
+conan install . --output-folder=build/release --build=missing --settings=build_type=Release
+cmake --preset conan-release
 ```
 
-Then compile as usual:
+Then compile:
 ```
-cmake ../.. -DCMAKE_BUILD_TYPE=Debug  # Or Release
-make -j 6
+cmake --build --preset conan-debug  # Or conan-release
 ```
 
 This results in the executable `sapling`.
