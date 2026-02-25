@@ -29,7 +29,8 @@ inline auto operator<<(std::ostream& os, const Tree_loc& loc) -> std::ostream& {
 template<typename X>
 using Tree_annotation = std::pair<const Tree_loc, X>;
 
-inline auto operator<<(std::ostream& os, const Tree_annotation<auto>& annotation) -> std::ostream& {
+template<typename X>
+auto operator<<(std::ostream& os, const Tree_annotation<X>& annotation) -> std::ostream& {
   const auto& [loc, info] = annotation;
   return os << absl::StreamFormat("%s:%s", absl::FormatStreamed(loc), absl::FormatStreamed(info));
 }
