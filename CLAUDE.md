@@ -260,7 +260,7 @@ sapling.cpp
 
 ## Build system
 
-- **CMake** (C++20, `-Wall -Wextra -Werror -ffast-math -msse3`)
+- **CMake** (C++20, `-Wall -Wextra -Werror -msse3`)
 - **Conan 2.25** for Eigen3 and Boost
 - **FetchContent** for nlohmann/json and GoogleTest
 - **Git submodules** for abseil-cpp, cxxopts, cppcoro
