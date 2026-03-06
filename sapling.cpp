@@ -10,6 +10,7 @@
 #include "cxxopts.hpp"
 #include "nlohmann/json.hpp"
 
+#include "alias_sampler.h"
 #include "coal_sim.h"
 #include "dates.h"
 #include "pop_model.h"
@@ -47,9 +48,14 @@ struct Options {
   double hky_kappa;
   Seq_vector<double> hky_pi_a;
 
+  // Site-rate heterogeneity
+  double site_rate_heterogeneity_alpha;
+
   // Genome
   int num_sites;
   
+  bool output_mutation_counts;
+
   std::optional<std::string> out_info_filename;
   std::optional<std::string> out_newick_filename;
   std::optional<std::string> out_nexus_filename;
@@ -107,6 +113,11 @@ auto process_args(int argc, char** argv) -> Options {
        cxxopts::value<double>()->default_value("0.25"))
       ("hky-pi-T", "Stationary base frequency for T (default: 0.25)",
        cxxopts::value<double>()->default_value("0.25"))
+      ("site-rate-heterogeneity-alpha",
+       "Shape and rate parameter alpha for Gamma-distributed site-rate heterogeneity. "
+       "Each site l gets a rate modifier nu_l ~ Gamma(shape=alpha, rate=alpha) with mean 1 and variance 1/alpha. "
+       "A value of 0.0 (default) means no site-rate heterogeneity.",
+       cxxopts::value<double>()->default_value("0.0"))
       ;
 
   options.add_options("Genome")
@@ -115,6 +126,7 @@ auto process_args(int argc, char** argv) -> Options {
       ;
 
   options.add_options("Output")
+      ("output-mutation-counts", "Include per-site mutation counts in the info JSON output")
       ("out-prefix", "Default filename prefix for output files, e.g., 'foo' creates 'foo.info', 'foo.fasta', etc.",
        cxxopts::value<std::string>())
       ("out-info", "Filename of output info file (default: <prefix>_info.json)",
@@ -263,6 +275,11 @@ auto process_args(int argc, char** argv) -> Options {
       fatal("HKY stationary base frequencies (--hky-pi-{A,C,G,T}) should add to 1.0");
     }
 
+    auto site_rate_heterogeneity_alpha = opts["site-rate-heterogeneity-alpha"].as<double>();
+    if (site_rate_heterogeneity_alpha < 0.0) {
+      fatal("Site-rate heterogeneity alpha (--site-rate-heterogeneity-alpha) must be non-negative");
+    }
+
     // Genome
     auto num_sites = opts["L"].as<int>();
     
@@ -302,7 +319,9 @@ auto process_args(int argc, char** argv) -> Options {
       .mu = mu,
       .hky_kappa = hky_kappa,
       .hky_pi_a = Seq_vector{hky_pi_A, hky_pi_C, hky_pi_G, hky_pi_T},
+      .site_rate_heterogeneity_alpha = site_rate_heterogeneity_alpha,
       .num_sites = num_sites,
+      .output_mutation_counts = opts.count("output-mutation-counts") > 0,
       .out_info_filename = std::move(out_info),
       .out_newick_filename = std::move(out_newick),
       .out_nexus_filename = std::move(out_nexus),
@@ -339,7 +358,7 @@ auto calc_tree_height(const Phylo_tree& tree) -> double {
   return max_tip_t - tree.at_root().t;
 }
 
-auto dump_info(const Options& opts, const Phylo_tree& tree) -> std::string {
+auto dump_info(const Options& opts, const Phylo_tree& tree, const Global_evo_model& evo) -> std::string {
 
   using enum Real_seq_letter;
   
@@ -381,6 +400,11 @@ auto dump_info(const Options& opts, const Phylo_tree& tree) -> std::string {
     {"pi", {opts.hky_pi_a[A], opts.hky_pi_a[C], opts.hky_pi_a[G], opts.hky_pi_a[T]}}
   };
 
+  if (opts.site_rate_heterogeneity_alpha > 0.0) {
+    subst_j["site_rate_heterogeneity_alpha"] = opts.site_rate_heterogeneity_alpha;
+    subst_j["nu_l"] = evo.nu_l;
+  }
+
   auto result = json{
     {"sapling_version", k_sapling_version_string},
     {"sapling_build_number", k_sapling_build_number},
@@ -399,6 +423,15 @@ auto dump_info(const Options& opts, const Phylo_tree& tree) -> std::string {
         {"t_mrca_date", to_iso_date(tree.at_root().t, opts.t0)},
         {"tree_height", calc_tree_height(tree)}}}
   };
+
+  if (opts.output_mutation_counts) {
+    auto mutation_counts = Site_vector<int>(opts.num_sites, 0);
+    for (const auto& [loc, mm] : tree.mutations) {
+      ++mutation_counts[mm.site];
+    }
+    result["mutation_counts"] = mutation_counts;
+  }
+
   return result.dump(2);
 }
 
@@ -482,66 +515,81 @@ auto gen_random_sequence(
 auto simulate_mutations(Phylo_tree& tree, const Global_evo_model& evo, absl::BitGenRef rng) -> void {
   tree.mutations.clear();
 
-  struct Pending_node { Node_index node; double lambda; Sequence_overlay seq; };
+  // We use a thinning approach combined with the alias method for O(1) site selection.
+  //
+  // The exact per-site mutation rate is Q_l_a(l, seq[l]) = mu * nu_l * q_a(seq[l]),
+  // which depends on the current base at site l.  A static alias table built from nu_l
+  // alone cannot account for the base-dependent escape rate q_a(seq[l]).
+  //
+  // Instead, we use a constant upper-bound rate:
+  //   lambda_upper = mu * q_a_max * sum_l nu_l
+  // where q_a_max = max_a q_a(a) is the maximum escape rate over all 4 bases.
+  // This rate is independent of the sequence state, so it never needs updating.
+  //
+  // At each event:
+  //   1. Draw event time from Exponential(lambda_upper)
+  //   2. Pick site l from the alias table (weight proportional to nu_l), O(1)
+  //   3. Accept with probability q_a(seq[l]) / q_a_max (thinning)
+  //   4. If accepted, pick target base from off-diagonal q_ab row and apply
+  //
+  // This is a valid thinning of the Poisson process: the effective per-site rate is
+  //   lambda_upper * P(pick l) * P(accept at l)
+  //   = (mu * q_a_max * sum_j nu_j) * (nu_l / sum_j nu_j) * (q_a(seq[l]) / q_a_max)
+  //   = mu * nu_l * q_a(seq[l])
+  // which is exactly Q_l_a(l, seq[l]).
 
-  // Calculate lambda at the root
-  auto lambda_root = 0.0;
-  for (auto l = Site_index{0}; l != tree.num_sites(); ++l) {
-    lambda_root += evo.Q_l_a(l, tree.ref_sequence[l]);
+  auto site_sampler = Alias_sampler{evo.nu_l};
+
+  // Compute q_a_max and lambda_upper
+  auto q_a_max = 0.0;
+  for (const auto& a : k_all_real_seq_letters) {
+    q_a_max = std::max(q_a_max, evo.site_evo_model.q_a(a));
   }
+  auto sum_nu_l = std::accumulate(evo.nu_l.begin(), evo.nu_l.end(), 0.0);
+  auto lambda_upper = evo.site_evo_model.mu * q_a_max * sum_nu_l;
 
-  // Kick off pre-order traversal while updating lambda at every turn
+  struct Pending_node { Node_index node; Sequence_overlay seq; };
+
   auto work_stack = std::stack<Pending_node, std::vector<Pending_node>>{};
-  work_stack.push({tree.root(), lambda_root, Sequence_overlay{tree.ref_sequence}});
+  work_stack.push({tree.root(), Sequence_overlay{tree.ref_sequence}});
   while (not work_stack.empty()) {
-    auto [node, lambda_at_node, seq_at_node] = std::move(work_stack.top());
+    auto [node, seq_at_node] = std::move(work_stack.top());
     work_stack.pop();
 
     for (const auto& child : tree.at(node).children()) {
-      auto lambda = lambda_at_node;
       auto t = tree.at(node).t;
       auto t_max = tree.at(child).t;
       auto seq = seq_at_node;
 
       // Evolve sequence from beginning to end of branch
       while (true) {
-        // Pick a time
-        auto next_t = t + absl::Exponential(rng, lambda);
+        auto next_t = t + absl::Exponential(rng, lambda_upper);
         if (next_t >= t_max) { break; }
+        t = next_t;
 
-        // Pick a site (TODO: need to do this *way* more efficiently using a Fenwick Tree)
-        // e.g.: https://medium.com/@sandeepsign/binary-index-tree-efficient-accumulative-sum-or-count-3cae9b83e41a
-        // or here: https://en.wikipedia.org/wiki/Fenwick_tree
-        auto target_cum_Q = absl::Uniform(absl::IntervalClosedOpen, rng, 0.0, lambda);
-        auto l = Site_index{0};
-        auto cum_Q = evo.Q_l_a(0, seq[0]);
-        while (l != tree.num_sites() && cum_Q < target_cum_Q) {
-          // Edge case when mutating last site but rounding errors make cum_Q < target_cum_Q
-          if ((l+1) == tree.num_sites()) { break; }
-          
-          ++l;
-          cum_Q += evo.Q_l_a(l, seq[l]);
-        }
-        CHECK_GE(l, 0);
-        CHECK_LT(l, tree.num_sites());
+        // Pick a site from the alias table (weight proportional to nu_l)
+        auto l = static_cast<Site_index>(site_sampler.sample(rng));
 
-        // Pick a target state
+        // Thinning: accept with probability q_a(seq[l]) / q_a_max
         auto a = seq[l];
+        auto q_a = evo.site_evo_model.q_a(a);
+        if (absl::Uniform(absl::IntervalClosedOpen, rng, 0.0, q_a_max) >= q_a) {
+          continue;  // rejected
+        }
+
+        // Pick a target state from off-diagonal q_ab row
         auto w = Seq_vector<double>{0.0};
         for (const auto& b : k_all_real_seq_letters) {
-          w[b] = (a == b ? 0.0 : evo.Q_l_ab(l, a, b));
+          w[b] = (a == b ? 0.0 : evo.site_evo_model.q_ab[a][b]);
         }
         auto b = pick_state(w, rng);
 
-        // Do it
-        tree.mutations.insert(Mutation{{child, next_t}, {l, a, b}});
+        tree.mutations.insert(Mutation{{child, t}, {l, a, b}});
         seq[l] = b;
-        t = next_t;
-        lambda += evo.Q_l_a(l, b) - evo.Q_l_a(l, a);
       }
 
       if (not tree.at(child).is_tip()) {
-        work_stack.push({child, lambda, seq});
+        work_stack.push({child, seq});
       }
     }
   }
@@ -740,12 +788,24 @@ auto main(int argc, char** argv) -> int {
     auto evo = make_single_partition_global_evo_model(opts.num_sites);
     evo.site_evo_model = hky.derive_site_evo_model();
 
-    // TODO: Fill in evo.nu_l[l] with something other than 1.0
+    if (opts.site_rate_heterogeneity_alpha > 0.0) {
+      auto alpha = opts.site_rate_heterogeneity_alpha;
+      // nu_l ~ Gamma(shape=alpha, rate=alpha), i.e., Gamma(shape=alpha, scale=1/alpha)
+      // Mean = 1, variance = 1/alpha
+      auto gamma_dist = std::gamma_distribution<double>{alpha, 1.0 / alpha};
+      for (auto l = Site_index{0}; l != opts.num_sites; ++l) {
+        evo.nu_l[l] = gamma_dist(rng);
+      }
+    } else {
+      for (auto l = Site_index{0}; l != opts.num_sites; ++l) {
+        evo.nu_l[l] = 1.0;
+      }
+    }
 
     simulate_mutations(tree, evo, rng);
 
     write_to(opts.out_info_filename, "Info", [&](auto& os) {
-      os << dump_info(opts, tree) << "\n";
+      os << dump_info(opts, tree, evo) << "\n";
     });
 
     write_to(opts.out_newick_filename, "Newick", [&](auto& os) {

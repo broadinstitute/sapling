@@ -2,6 +2,7 @@ project(tests)
 
 add_executable(tests
   # Source files in alphabetical order
+  alias_sampler_tests.cpp
   dates_tests.cpp
   mutations_tests.cpp
   pop_model_tests.cpp
