@@ -187,3 +187,77 @@ No changes to existing tests needed.
 4. Add alpha and nu_l to info JSON output
 5. Build and run tests
 6. Manual integration test with a sample run
+
+## Endnote: Stackless Vose Algorithm
+
+Vose (1991, Section VI) hints that the `small` and `large` stacks can be eliminated using
+two forward-scanning pointers `j` (for small entries) and `k` (for large entries), plus a
+single temporary variable.  Here is the fully spelled-out algorithm:
+
+```
+j = 0       // scans forward for small entries (prob < 1.0)
+k = 0       // scans forward for large entries (prob >= 1.0)
+temp = -1   // deferred small entry (at most one)
+
+loop:
+    // 1. Get next small entry
+    if temp >= 0:
+        s = temp
+        temp = -1
+    else:
+        advance j until prob[j] < 1.0 (or j >= n → done)
+        s = j; j++
+
+    // 2. Get next large entry
+    advance k until prob[k] >= 1.0 (or k >= n → done)
+    l = k
+
+    // 3. Pair them (same as standard Vose)
+    alias[s] = l
+    prob[l] = (prob[l] + prob[s]) - 1.0
+
+    // 4. If l became small, handle it
+    if prob[l] < 1.0:
+        if l < j:     // j already passed l → must defer it
+            temp = l
+        // else:      // j hasn't reached l → j will find it naturally
+```
+
+**Why this works:** `j` and `k` scan the same `prob` array, which is mutated in place.
+When a large entry at position `l` gets drained below 1.0, there are two cases:
+
+1. **`l >= j`**: `j` hasn't reached `l` yet, so it will naturally find it as a small entry
+   during a future scan.  No special handling needed.
+
+2. **`l < j`**: `j` has already passed `l` and will never see it again.  We save `l` in
+   `temp` so it is used as the small entry in the next iteration, *before* resuming the `j`
+   scan.
+
+There is never a conflict with `temp` already being set, because `temp` is always consumed
+at the *start* of the very next iteration (before any new pairing could set it again).
+
+**Why `k` and `j` don't interfere:**
+
+- `k` skips entries with `prob < 1.0`, so it never picks up a small entry (including entries
+  recently used as `s`).
+- `j` skips entries with `prob >= 1.0`, so it never picks up a large entry.
+- After pairing `(s, l)`, if `prob[l]` drops but stays `>= 1.0`, `k` stays at position `l`
+  and reuses it next iteration (it still has excess probability to donate).  `k` only advances
+  past `l` when `prob[l]` finally drops below 1.0.
+- `j` never re-finds `s` because `j` was already incremented past `s`, and `prob[s]` is
+  unchanged (only `prob[l]` is modified).
+
+**Worked example:** Weights `[5, 5, 1, 1]`, normalized to `prob = [1.667, 1.667, 0.333, 0.333]`:
+
+| Iter | Source              | s | l (k)                | alias[s]=l | new prob[l] | temp              |
+|------|---------------------|---|----------------------|------------|-------------|-------------------|
+| 1    | j→2 (skip 0,1)      | 2 | 0                    | alias[2]=0 | 1.0         | —                 |
+| 2    | j→3                 | 3 | 0                    | alias[3]=0 | 0.333       | 0 (since 0 < j=4) |
+| 3    | temp=0              | 0 | 1 (k advances past 0)| alias[0]=1 | 1.0         | —                 |
+
+Result: `prob = [0.333, 1.0, 0.333, 0.333]`, `alias = [1, —, 0, 0]`.  Correct.
+
+**Why we don't use it:** This eliminates two `vector` allocations but adds a conditional
+branch and the `temp` variable.  The logic is trickier to reason about.  For ~40 lines of
+code running once at startup on a table of size L, the explicit stacks are clearer and the
+O(L) allocation is negligible.

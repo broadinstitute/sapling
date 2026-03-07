@@ -43,7 +43,11 @@ struct Alias_sampler {
       prob[i] = weights[i] * scale;
     }
 
-    // Partition indices into small (prob < 1) and large (prob >= 1)
+    // Partition indices into small (prob < 1) and large (prob >= 1).
+    // Note: it is possible to eliminate these stacks using two scanning pointers
+    // and a temporary variable (see Vose 1991, Section VI).  The stackless
+    // algorithm is fully spelled out in claude_plans/2026-03-06-SiteRateHeterogeneity.md.
+    // We prefer the explicit stacks: they are clearer and the O(n) allocation is negligible.
     auto small = std::vector<int>{};
     auto large = std::vector<int>{};
     for (auto i = 0; i < n; ++i) {
