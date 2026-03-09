@@ -1,3 +1,5 @@
+#include <algorithm>
+#include <cmath>
 #include <iostream>
 #include <fstream>
 #include <functional>
@@ -30,6 +32,23 @@ auto fatal(std::string_view msg) -> void {
 }
 
 
+// A half-open range [start, end) of sites, 0-indexed
+struct Site_range {
+  Site_index start;
+  Site_index end;
+};
+
+// Per-tip missing data: the raw simulation inputs (for info JSON) and merged ranges (for output)
+struct Tip_missing_data {
+  std::vector<Site_range> gaps;
+  std::vector<Site_index> missing_sites;
+  std::vector<Site_range> missing_ranges;
+};
+
+// All missing data, keyed by tip Node_index
+using Missing_data = absl::flat_hash_map<Node_index, Tip_missing_data>;
+
+
 struct Options {
   std::vector<std::string> args;
   uint32_t seed;
@@ -53,7 +72,12 @@ struct Options {
 
   // Genome
   int num_sites;
-  
+
+  // Missing data
+  double missing_data_mean_num_gaps;
+  double missing_data_mean_gap_length;
+  double missing_data_mean_num_missing_sites;
+
   bool output_mutation_counts;
 
   std::optional<std::string> out_info_filename;
@@ -123,6 +147,21 @@ auto process_args(int argc, char** argv) -> Options {
   options.add_options("Genome")
       ("L,num-sites", "Number of sites in the genome",
        cxxopts::value<int>())
+      ;
+
+  options.add_options("Missing data")
+      ("missing-data-mean-num-gaps",
+       "Mean number of missing-data gaps per tip (Poisson-distributed). "
+       "A value of 0.0 (default) means no gaps.",
+       cxxopts::value<double>()->default_value("0.0"))
+      ("missing-data-mean-gap-length",
+       "Mean gap length in sites (exponentially distributed, rounded to nearest integer). "
+       "Gaps that round to 0 sites are discarded. (default: 1000.0)",
+       cxxopts::value<double>()->default_value("1000.0"))
+      ("missing-data-mean-num-missing-sites",
+       "Mean number of individually missing sites per tip (Poisson-distributed). "
+       "A value of 0.0 (default) means no individual missing sites.",
+       cxxopts::value<double>()->default_value("0.0"))
       ;
 
   options.add_options("Output")
@@ -282,7 +321,24 @@ auto process_args(int argc, char** argv) -> Options {
 
     // Genome
     auto num_sites = opts["L"].as<int>();
-    
+
+    // Missing data
+    auto missing_data_mean_num_gaps = opts["missing-data-mean-num-gaps"].as<double>();
+    if (missing_data_mean_num_gaps < 0.0) {
+      fatal("Mean number of gaps (--missing-data-mean-num-gaps) must be non-negative");
+    }
+    auto missing_data_mean_gap_length = opts["missing-data-mean-gap-length"].as<double>();
+    if (missing_data_mean_gap_length < 0.0) {
+      fatal("Mean gap length (--missing-data-mean-gap-length) must be non-negative");
+    }
+    if (missing_data_mean_num_gaps > 0.0 && missing_data_mean_gap_length <= 0.0) {
+      fatal("Mean gap length (--missing-data-mean-gap-length) must be positive when gaps are enabled");
+    }
+    auto missing_data_mean_num_missing_sites = opts["missing-data-mean-num-missing-sites"].as<double>();
+    if (missing_data_mean_num_missing_sites < 0.0) {
+      fatal("Mean number of missing sites (--missing-data-mean-num-missing-sites) must be non-negative");
+    }
+
     // Output files
     auto out_prefix = std::optional<std::string>{};
     if (opts.count("out-prefix")) {
@@ -321,6 +377,9 @@ auto process_args(int argc, char** argv) -> Options {
       .hky_pi_a = Seq_vector{hky_pi_A, hky_pi_C, hky_pi_G, hky_pi_T},
       .site_rate_heterogeneity_alpha = site_rate_heterogeneity_alpha,
       .num_sites = num_sites,
+      .missing_data_mean_num_gaps = missing_data_mean_num_gaps,
+      .missing_data_mean_gap_length = missing_data_mean_gap_length,
+      .missing_data_mean_num_missing_sites = missing_data_mean_num_missing_sites,
       .output_mutation_counts = opts.count("output-mutation-counts") > 0,
       .out_info_filename = std::move(out_info),
       .out_newick_filename = std::move(out_newick),
@@ -336,6 +395,18 @@ auto process_args(int argc, char** argv) -> Options {
     std::cerr << "ERROR: " << x.what() << "\n";
     std::exit(EXIT_FAILURE);
   }
+}
+
+auto is_missing_data_active(const Options& opts) -> bool {
+  return opts.missing_data_mean_num_gaps > 0.0 || opts.missing_data_mean_num_missing_sites > 0.0;
+}
+
+auto make_complete_filename(const std::string& filename) -> std::string {
+  auto dot = filename.rfind('.');
+  if (dot == std::string::npos) {
+    return filename + "-COMPLETE";
+  }
+  return filename.substr(0, dot) + "-COMPLETE" + filename.substr(dot);
 }
 
 auto calc_total_branch_length(const Phylo_tree& tree) -> double {
@@ -358,7 +429,8 @@ auto calc_tree_height(const Phylo_tree& tree) -> double {
   return max_tip_t - tree.at_root().t;
 }
 
-auto dump_info(const Options& opts, const Phylo_tree& tree, const Global_evo_model& evo) -> std::string {
+auto dump_info(const Options& opts, const Phylo_tree& tree, const Global_evo_model& evo,
+               const Missing_data& missing_data = {}) -> std::string {
 
   using enum Real_seq_letter;
   
@@ -430,6 +502,48 @@ auto dump_info(const Options& opts, const Phylo_tree& tree, const Global_evo_mod
       ++mutation_counts[mm.site];
     }
     result["mutation_counts"] = mutation_counts;
+  }
+
+  if (is_missing_data_active(opts)) {
+    auto missing_j = json{
+      {"mean_num_gaps", opts.missing_data_mean_num_gaps},
+      {"mean_gap_length", opts.missing_data_mean_gap_length},
+      {"mean_num_missing_sites", opts.missing_data_mean_num_missing_sites}
+    };
+
+    if (opts.out_fasta_filename.has_value()) {
+      missing_j["complete_fasta"] = make_complete_filename(opts.out_fasta_filename.value());
+    }
+    if (opts.out_maple_filename.has_value()) {
+      missing_j["complete_maple"] = make_complete_filename(opts.out_maple_filename.value());
+    }
+
+    auto per_tip_j = json::object();
+    for (const auto& node : index_order_traversal(tree)) {
+      if (not tree.at(node).is_tip()) { continue; }
+      auto it = missing_data.find(node);
+      if (it == missing_data.end()) { continue; }
+      const auto& tip_data = it->second;
+
+      auto gaps_j = json::array();
+      for (const auto& g : tip_data.gaps) {
+        gaps_j.push_back({g.start, g.end});
+      }
+
+      auto ranges_j = json::array();
+      for (const auto& r : tip_data.missing_ranges) {
+        ranges_j.push_back({r.start, r.end});
+      }
+
+      per_tip_j[tree.at(node).name] = json{
+        {"gaps", gaps_j},
+        {"missing_sites", tip_data.missing_sites},
+        {"missing_ranges", ranges_j}
+      };
+    }
+    missing_j["per_tip"] = per_tip_j;
+
+    result["missing_data"] = missing_j;
   }
 
   return result.dump(2);
@@ -595,7 +709,82 @@ auto simulate_mutations(Phylo_tree& tree, const Global_evo_model& evo, absl::Bit
   }
 }
 
-auto output_newick_tree(std::ostream& os, const Phylo_tree& tree, const absl::Time& t0, bool annotated) -> void {
+auto simulate_tip_missing_data(
+    int num_sites,
+    double mean_num_gaps,
+    double mean_gap_length,
+    double mean_num_missing_sites,
+    absl::BitGenRef rng)
+    -> Tip_missing_data {
+
+  auto result = Tip_missing_data{};
+  auto L = num_sites;
+
+  // Level events: (position, delta) where delta is +1 or -1
+  auto events = std::vector<std::pair<Site_index, int>>{};
+
+  // Simulate gaps
+  if (mean_num_gaps > 0.0) {
+    auto num_gaps = std::poisson_distribution<int>{mean_num_gaps}(rng);
+    for (auto i = 0; i < num_gaps; ++i) {
+      auto raw_length = absl::Exponential(rng, 1.0 / mean_gap_length);
+      auto length = static_cast<Site_index>(std::lround(raw_length));
+      if (length <= 0) { continue; }
+      if (length > L) { length = L; }
+      auto start = absl::Uniform(absl::IntervalClosedClosed, rng, 0, L - length);
+      auto end = start + length;
+      result.gaps.push_back({start, end});
+      events.push_back({start, +1});
+      events.push_back({end, -1});
+    }
+  }
+
+  // Simulate individual missing sites
+  if (mean_num_missing_sites > 0.0) {
+    auto num_missing = std::poisson_distribution<int>{mean_num_missing_sites}(rng);
+    for (auto i = 0; i < num_missing; ++i) {
+      auto site = absl::Uniform(absl::IntervalClosedClosed, rng, 0, L - 1);
+      result.missing_sites.push_back(site);
+      events.push_back({site, +1});
+      events.push_back({site + 1, -1});
+    }
+  }
+
+  // Merge into non-overlapping ranges using level sweep
+  std::ranges::sort(events);
+  auto level = 0;
+  auto range_start = Site_index{-1};
+  for (const auto& [pos, delta] : events) {
+    auto was_missing = level > 0;
+    level += delta;
+    auto is_missing = level > 0;
+    if (not was_missing && is_missing) {
+      range_start = pos;
+    } else if (was_missing && not is_missing) {
+      result.missing_ranges.push_back({range_start, pos});
+    }
+  }
+
+  return result;
+}
+
+auto simulate_missing_data(const Phylo_tree& tree, const Options& opts, absl::BitGenRef rng) -> Missing_data {
+  auto result = Missing_data{};
+  for (const auto& node : index_order_traversal(tree)) {
+    if (tree.at(node).is_tip()) {
+      result[node] = simulate_tip_missing_data(
+          opts.num_sites,
+          opts.missing_data_mean_num_gaps,
+          opts.missing_data_mean_gap_length,
+          opts.missing_data_mean_num_missing_sites,
+          rng);
+    }
+  }
+  return result;
+}
+
+auto output_newick_tree(std::ostream& os, const Phylo_tree& tree, const absl::Time& t0, bool annotated,
+                        const Missing_data& missing_data = {}) -> void {
   if (annotated) {
     // Mark as rooted tree and print out sequence at root
     os << "[&R] ";
@@ -634,11 +823,29 @@ auto output_newick_tree(std::ostream& os, const Phylo_tree& tree, const absl::Ti
       os << tree.at(node).name;
 
       if (annotated) {
+        auto annotations = std::vector<std::string>{};
         if (not tree.at(node).is_tip()) {
-          os << "[&date=" << to_iso_date(tree.at(node).t, t0) << "]";
+          annotations.push_back(absl::StrFormat("date=%s", to_iso_date(tree.at(node).t, t0)));
+        }
+        if (tree.at(node).is_tip()) {
+          if (auto it = missing_data.find(node); it != missing_data.end()) {
+            const auto& ranges = it->second.missing_ranges;
+            if (not ranges.empty()) {
+              auto range_strs = std::vector<std::string>{};
+              for (const auto& r : ranges) {
+                range_strs.push_back(absl::StrFormat("%d", r.start));
+                range_strs.push_back(absl::StrFormat("%d", r.end));
+              }
+              annotations.push_back(
+                  absl::StrFormat("missing_data_ranges={%s}", absl::StrJoin(range_strs, ",")));
+            }
+          }
+        }
+        if (not annotations.empty()) {
+          os << "[&" << absl::StrJoin(annotations, ",") << "]";
         }
       }
-      
+
       os << ":";
 
       auto t_parent = (node == tree.root() ? tree.at_root().t : tree.at_parent_of(node).t);
@@ -734,6 +941,96 @@ auto output_maple(std::ostream& os, const Phylo_tree& tree) -> void {
   }
 }
 
+auto output_fasta_with_missing_data(
+    std::ostream& os, const Phylo_tree& tree, const Missing_data& missing_data) -> void {
+  auto seq = Sequence_overlay{tree.ref_sequence};
+  for (const auto& [node, children_so_far] : traversal(tree)) {
+    if (children_so_far == 0) {
+      for (const auto& [loc, mm] : on_branch(node, tree.mutations)) {
+        CHECK_EQ(seq[mm.site], mm.from);
+        seq[mm.site] = mm.to;
+      }
+    }
+
+    if (children_so_far == std::ssize(tree.at(node).children())) {
+      if (tree.at(node).is_tip()) {
+        os << ">" << tree.at(node).name << "\n";
+        const auto& ranges = missing_data.at(node).missing_ranges;
+        auto ri = 0;  // index into missing_ranges
+        auto num_sites = static_cast<Site_index>(std::ssize(seq));
+        for (auto l = Site_index{0}; l < num_sites; ++l) {
+          // Advance past ranges that end before this site
+          while (ri < std::ssize(ranges) && ranges[ri].end <= l) { ++ri; }
+          if (ri < std::ssize(ranges) && ranges[ri].start <= l) {
+            os << 'N';
+          } else {
+            os << to_char(seq[l]);
+          }
+        }
+        os << "\n";
+      }
+
+      for (const auto& [loc, mm] : on_branch(node, tree.mutations) | std::views::reverse) {
+        CHECK_EQ(seq[mm.site], mm.to);
+        seq[mm.site] = mm.from;
+      }
+    }
+  }
+}
+
+auto output_maple_with_missing_data(
+    std::ostream& os, const Phylo_tree& tree, const Missing_data& missing_data) -> void {
+  os << ">reference\n";
+  for (const auto& a : tree.ref_sequence) {
+    os << to_char(a);
+  }
+  os << "\n";
+
+  auto seq = Sequence_overlay{tree.ref_sequence};
+  for (const auto& [node, children_so_far] : traversal(tree)) {
+    if (children_so_far == 0) {
+      for (const auto& [loc, mm] : on_branch(node, tree.mutations)) {
+        CHECK_EQ(seq[mm.site], mm.from);
+        seq[mm.site] = mm.to;
+      }
+    }
+
+    if (children_so_far == std::ssize(tree.at(node).children())) {
+      if (tree.at(node).is_tip()) {
+        os << ">" << tree.at(node).name << "\n";
+
+        // Collect sorted deltas, then interleave with missing ranges
+        auto deltas = std::vector<std::pair<Site_index, Real_seq_letter>>{
+            seq.deltas().begin(), seq.deltas().end()};
+        std::ranges::sort(deltas);
+
+        const auto& ranges = missing_data.at(node).missing_ranges;
+        auto ri = 0;  // index into missing_ranges
+        for (const auto& [l, b] : deltas) {
+          // Output any missing ranges that start before this delta
+          while (ri < std::ssize(ranges) && ranges[ri].start <= l) {
+            os << "N\t" << (ranges[ri].start + 1) << "\t" << (ranges[ri].end - ranges[ri].start) << "\n";
+            ++ri;
+          }
+          // Skip deltas that fall within an already-output missing range
+          if (ri > 0 && l < ranges[ri - 1].end) { continue; }
+          os << to_char(b) << "\t" << (l + 1) << "\n";
+        }
+        // Output any remaining missing ranges after all deltas
+        while (ri < std::ssize(ranges)) {
+          os << "N\t" << (ranges[ri].start + 1) << "\t" << (ranges[ri].end - ranges[ri].start) << "\n";
+          ++ri;
+        }
+      }
+
+      for (const auto& [loc, mm] : on_branch(node, tree.mutations) | std::views::reverse) {
+        CHECK_EQ(seq[mm.site], mm.to);
+        seq[mm.site] = mm.from;
+      }
+    }
+  }
+}
+
 auto write_to(const std::optional<std::string> maybe_filename, std::string_view desc, auto writer) -> void {
   if (not maybe_filename.has_value()) {
     return;
@@ -804,8 +1101,15 @@ auto main(int argc, char** argv) -> int {
 
     simulate_mutations(tree, evo, rng);
 
+    // Simulate missing data (if active)
+    auto missing_data = Missing_data{};
+    auto missing_active = is_missing_data_active(opts);
+    if (missing_active) {
+      missing_data = simulate_missing_data(tree, opts, rng);
+    }
+
     write_to(opts.out_info_filename, "Info", [&](auto& os) {
-      os << dump_info(opts, tree, evo) << "\n";
+      os << dump_info(opts, tree, evo, missing_data) << "\n";
     });
 
     write_to(opts.out_newick_filename, "Newick", [&](auto& os) {
@@ -817,17 +1121,39 @@ auto main(int argc, char** argv) -> int {
          << "\n"
          << "Begin trees;\n"
          << "tree TREE1 = ";
-      output_newick_tree(os, tree, opts.t0, true);
+      output_newick_tree(os, tree, opts.t0, true, missing_data);
       os << "\nEnd;\n";
     });
 
-    write_to(opts.out_fasta_filename, "FASTA", [&](auto& os) {
-      output_fasta(os, tree);
-    });
+    if (missing_active) {
+      // Write complete (unmasked) files, then masked files
+      write_to(opts.out_fasta_filename.has_value()
+                   ? std::optional{make_complete_filename(opts.out_fasta_filename.value())}
+                   : std::nullopt,
+               "Complete FASTA", [&](auto& os) {
+        output_fasta(os, tree);
+      });
+      write_to(opts.out_fasta_filename, "FASTA", [&](auto& os) {
+        output_fasta_with_missing_data(os, tree, missing_data);
+      });
 
-    write_to(opts.out_maple_filename, "Maple", [&](auto& os) {
-      output_maple(os, tree);
-    });
+      write_to(opts.out_maple_filename.has_value()
+                   ? std::optional{make_complete_filename(opts.out_maple_filename.value())}
+                   : std::nullopt,
+               "Complete Maple", [&](auto& os) {
+        output_maple(os, tree);
+      });
+      write_to(opts.out_maple_filename, "Maple", [&](auto& os) {
+        output_maple_with_missing_data(os, tree, missing_data);
+      });
+    } else {
+      write_to(opts.out_fasta_filename, "FASTA", [&](auto& os) {
+        output_fasta(os, tree);
+      });
+      write_to(opts.out_maple_filename, "Maple", [&](auto& os) {
+        output_maple(os, tree);
+      });
+    }
 
     std::cerr << "Total number of mutations: " << tree.mutations.size() << "\n";
     std::cerr << "Total branch length: " << calc_total_branch_length(tree) << " years\n";
