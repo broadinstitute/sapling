@@ -3,7 +3,6 @@ add_library(sapling_core
   estd.h
   coal_sim.h coal_sim.cpp
   dates.h dates.cpp
-  distributions.h
   evo_hky.h evo_hky.cpp
   evo_model.h evo_model.cpp
   mutations.h

@@ -68,13 +68,13 @@ sapling/
                                 Seq_vector<T>, Seq_matrix<T>, pick_state()
     sequence_overlay.h        Memory-efficient mutable view over a Real_sequence (base + sparse deltas)
     mutations.h               Tree_loc, Mutation_info, Mutations (btree_multimap), on_branch()
-    pop_model.h / .cpp        Pop_model interface + Const_pop_model, Exp_pop_model
+    pop_model.h / .cpp        Pop_model interface + Const_pop_model, Exp_pop_model, Skygrid_pop_model
     coal_sim.h / .cpp         Coalescent simulator: pop model + tip times -> Phylo_tree
     evo_model.h / .cpp        Site_evo_model (mu, pi_a, q_ab), Global_evo_model (per-site rates)
     evo_hky.h / .cpp          HKY substitution model -> derives Site_evo_model using Eigen
     dates.h / .cpp            ISO date parsing and formatting (parse_iso_date, to_iso_date)
     tip_file.h / .cpp         Tip file parser (Name|YYYY-MM-DD format)
-    distributions.h           Bounded_exponential_distribution (used by Exp_pop_model::sample)
+    alias_sampler.h           O(1) weighted random sampling via Vose's alias method
     estd.h                    is_debug_enabled flag
     CMakeLists.txt            Builds sapling_core library
 
@@ -84,7 +84,8 @@ sapling/
     sequence_tests.cpp        IUPAC conversions, Real_seq_letter round-trips
     sequence_overlay_tests.cpp  Overlay creation, delta tracking, materialize
     mutations_tests.cpp       Mutation insertion, on_branch lookup, erase_mutation
-    pop_model_tests.cpp       Const/Exp population model functions, intensity, inverse_intensity
+    pop_model_tests.cpp       Const/Exp/Skygrid population model functions, intensity, inverse_intensity
+    alias_sampler_tests.cpp   Alias sampler construction and sampling
     dates_tests.cpp           ISO date parsing/formatting round-trips
     tip_file_tests.cpp        Tip file parsing (valid/invalid inputs, edge cases)
     CMakeLists.txt
@@ -114,13 +115,14 @@ sapling/
 | `Tree_loc` | `mutations.h` | Point on a tree: `{branch, t}` |
 | `Mutation_info` | `mutations.h` | `{site, from, to}` |
 | `Mutations` | `mutations.h` | `btree_multimap<Tree_loc, Mutation_info>` keyed by branch then time; supports `on_branch(i, mutations)` to iterate over mutations on branch `i` |
-| `Pop_model` | `pop_model.h` | Abstract: `pop_at_time(t)`, `intensity_at_time(t)`, `inverse_intensity(I)`, `sample(min_t, max_t, rng)` |
+| `Pop_model` | `pop_model.h` | Abstract: `pop_at_time(t)`, `cum_pop_at_time(t)`, `intensity_at_time(t)`, `inverse_intensity(I)`, `inverse_cum_pop(P)` |
 | `Const_pop_model` | `pop_model.h/.cpp` | Constant N_e; intensity I(t) = t/N |
 | `Exp_pop_model` | `pop_model.h/.cpp` | N_e(t) = n0 * exp(g*(t-t0)); intensity via log formula |
+| `Skygrid_pop_model` | `pop_model.h/.cpp` | Piecewise population: log N(t) at knots, staircase or log-linear interpolation |
 | `Site_evo_model` | `evo_model.h` | `{mu, pi_a, q_ab}` -- single-site substitution rate matrix |
-| `Global_evo_model` | `evo_model.h` | `{nu_l[], site_evo_model}` -- per-site relative rates (all 1.0 for now) |
+| `Global_evo_model` | `evo_model.h` | `{nu_l[], site_evo_model}` -- per-site relative rates |
 | `Hky_model` | `evo_hky.h/.cpp` | `{mu, kappa, pi_a}` -> derives `Site_evo_model` via Eigen |
-| `Bounded_exponential_distribution` | `distributions.h` | Samples from exponential pdf truncated to [a, b]; used for tip time sampling under exponential growth |
+| `Alias_sampler` | `alias_sampler.h` | O(1) weighted random sampling using Vose's alias method |
 
 ## Main simulation pipeline
 
@@ -128,13 +130,13 @@ All orchestrated in `main()` in `sapling.cpp`:
 
 ```
 1. process_args(argc, argv)
-   Parse CLI options with cxxopts.  Choose population model (const or exp).
+   Parse CLI options with cxxopts.  Choose population model (const, exp, or skygrid).
    Parse ISO dates for tip time range.  Collect HKY parameters and output paths.
    -> Options struct
 
 2. choose_tip_times(pop_model, num_samples, min_tip_t, max_tip_t, t0, rng)
-   Draw N random sample times from the population model's sampling distribution
-   (uniform for const, bounded-exponential for exp growth).
+   Draw N random sample times proportional to N(t) via inverse-CDF sampling:
+   sample u ~ Uniform(cum_pop(min_tip_t), cum_pop(max_tip_t)), then t = inverse_cum_pop(u).
    Each time is rounded to the nearest ISO date.
    -> vector<double> tip_times
    Alternatively, if --tip-file is given, parse_tip_file() reads explicit
@@ -174,7 +176,9 @@ All orchestrated in `main()` in `sapling.cpp`:
    -> Site_evo_model {mu, pi_a, q_ab}
 
 8. make_single_partition_global_evo_model(num_sites)
-   Wrap the site model with per-site rate multipliers nu_l (all 1.0 for now).
+   Wrap the site model with per-site rate multipliers nu_l.
+   If --site-rate-heterogeneity-alpha > 0, nu_l ~ Gamma(alpha, alpha) (mean 1, variance 1/alpha);
+   otherwise nu_l = 1.0 for all sites.
    -> Global_evo_model
 
 9. simulate_mutations(tree, evo, rng)
@@ -219,7 +223,6 @@ sapling.cpp
   |       |       +---> sequence.h
   |       |       +---> mutations.h
   |       +---> pop_model.{h,cpp}
-  |               +---> distributions.h
   |
   +---> dates.{h,cpp}          (ISO date parsing / formatting)
   |       +---> absl::time

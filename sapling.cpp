@@ -7,6 +7,7 @@
 
 #include "absl/log/initialize.h"
 #include "absl/random/bit_gen_ref.h"
+#include "absl/random/distributions.h"
 #include "absl/strings/str_join.h"
 #include "absl/time/time.h"
 #include "cxxopts.hpp"
@@ -112,6 +113,18 @@ auto process_args(int argc, char** argv) -> Options {
       ("exp-pop-g", "Exponential growth rate (per year)",
        cxxopts::value<double>())
       ;
+  options.add_options("Skygrid population model [log N(t) specified at evenly-spaced knots]")
+      ("skygrid-first-knot-date", "Date of the first knot (e.g., 2019-01-01)",
+       cxxopts::value<std::string>())
+      ("skygrid-last-knot-date", "Date of the last knot (e.g., 2020-01-01)",
+       cxxopts::value<std::string>())
+      ("skygrid-gamma", "Comma-separated log population sizes at knots, e.g., \"3.0,4.0,3.5\"",
+       cxxopts::value<std::vector<double>>())
+      ("skygrid-Ns", "Comma-separated population sizes at knots (alternative to --skygrid-gamma), e.g., \"20.0,54.6,33.1\"",
+       cxxopts::value<std::vector<double>>())
+      ("skygrid-type", "Interpolation type: \"staircase\" or \"log-linear\" (default: staircase)",
+       cxxopts::value<std::string>()->default_value("staircase"))
+      ;
 
   options.add_options("Sampling strategy")
       ("n,num-samples", "Number of tips to sample",
@@ -214,16 +227,32 @@ auto process_args(int argc, char** argv) -> Options {
     }
     
     // Population model
+    //
+    // Exactly one of the three mutually exclusive groups must be specified:
+    //  - Constant: --const-pop-n0
+    //  - Exponential: --exp-pop-n0, --exp-pop-g
+    //  - Skygrid: --skygrid-first-knot-date, --skygrid-last-knot-date, --skygrid-gamma/--skygrid-Ns, --skygrid-type
+
+    auto has_const = opts.count("const-pop-n0") > 0;
+    auto has_exp = opts.count("exp-pop-n0") > 0 || opts.count("exp-pop-g") > 0;
+    auto has_skygrid = opts.count("skygrid-first-knot-date") > 0
+        || opts.count("skygrid-last-knot-date") > 0
+        || opts.count("skygrid-gamma") > 0
+        || opts.count("skygrid-Ns") > 0
+        || opts.count("skygrid-type") > 0;
+
+    auto num_models = (has_const ? 1 : 0) + (has_exp ? 1 : 0) + (has_skygrid ? 1 : 0);
+    if (num_models == 0) {
+      fatal("No population model specified.");
+    }
+    if (num_models > 1) {
+      fatal("Multiple population models specified; options for constant (--const-pop-*), "
+            "exponential (--exp-pop-*) and Skygrid (--skygrid-*) models are mutually exclusive.");
+    }
 
     auto pop_model = std::unique_ptr<Pop_model>{};
-    auto check_no_pop_model_yet = [&]() {
-      if (pop_model) {
-        fatal("Multiple population models specified; only one should be used.");
-      }
-    };
 
-    if (opts.count("const-pop-n0")) {
-      check_no_pop_model_yet();
+    if (has_const) {
       auto n0 = opts["const-pop-n0"].as<double>();
       if (n0 <= 0.0) {
         fatal("Effective population size n0 (--const-pop-n0) should be positive.");
@@ -231,8 +260,10 @@ auto process_args(int argc, char** argv) -> Options {
       pop_model = std::make_unique<Const_pop_model>(n0);
     }
 
-    if (opts.count("exp-pop-n0")) {
-      check_no_pop_model_yet();
+    if (has_exp) {
+      if (not opts.count("exp-pop-n0") || not opts.count("exp-pop-g")) {
+        fatal("Exponential model requires both --exp-pop-n0 and --exp-pop-g.");
+      }
       auto n0 = opts["exp-pop-n0"].as<double>();
       auto g = opts["exp-pop-g"].as<double>();
       if (n0 <= 0.0) {
@@ -244,8 +275,63 @@ auto process_args(int argc, char** argv) -> Options {
       pop_model = std::make_unique<Exp_pop_model>(0.0, n0, g);
     }
 
-    if (not pop_model) {
-      fatal("No population model specified.");
+    if (has_skygrid) {
+      if (not opts.count("skygrid-first-knot-date")) {
+        fatal("--skygrid-first-knot-date is required for Skygrid model");
+      }
+      if (not opts.count("skygrid-last-knot-date")) {
+        fatal("--skygrid-last-knot-date is required for Skygrid model");
+      }
+      if (not opts.count("skygrid-gamma") && not opts.count("skygrid-Ns")) {
+        fatal("Either --skygrid-gamma or --skygrid-Ns is required for Skygrid model");
+      }
+      if (opts.count("skygrid-gamma") && opts.count("skygrid-Ns")) {
+        fatal("Cannot specify both --skygrid-gamma and --skygrid-Ns");
+      }
+
+      auto x_0 = parse_iso_date(opts["skygrid-first-knot-date"].as<std::string>(), t0);
+      auto x_M = parse_iso_date(opts["skygrid-last-knot-date"].as<std::string>(), t0);
+      if (x_0 >= x_M) {
+        fatal("--skygrid-first-knot-date must be before --skygrid-last-knot-date");
+      }
+
+      auto gamma_k = std::vector<double>{};
+      if (opts.count("skygrid-gamma")) {
+        gamma_k = opts["skygrid-gamma"].as<std::vector<double>>();
+      } else {
+        auto Ns = opts["skygrid-Ns"].as<std::vector<double>>();
+        gamma_k.reserve(std::ssize(Ns));
+        for (auto N : Ns) {
+          if (N <= 0.0) {
+            fatal("All --skygrid-Ns values must be positive");
+          }
+          gamma_k.push_back(std::log(N));
+        }
+      }
+
+      if (std::ssize(gamma_k) < 2) {
+        fatal("Skygrid model requires at least 2 knot values");
+      }
+
+      // Build evenly-spaced knot times
+      auto M = std::ssize(gamma_k) - 1;
+      auto x_k = std::vector<double>(M + 1);
+      for (auto k = 0; k <= M; ++k) {
+        x_k[k] = x_0 + k * (x_M - x_0) / M;
+      }
+
+      auto type_str = opts["skygrid-type"].as<std::string>();
+      auto type = Skygrid_pop_model::Type::k_staircase;
+      if (type_str == "staircase") {
+        type = Skygrid_pop_model::Type::k_staircase;
+      } else if (type_str == "log-linear") {
+        type = Skygrid_pop_model::Type::k_log_linear;
+      } else {
+        fatal(absl::StrFormat("Unknown --skygrid-type: '%s' (expected 'staircase' or 'log-linear')", type_str));
+      }
+
+      pop_model = std::make_unique<Skygrid_pop_model>(
+          std::move(x_k), std::move(gamma_k), type);
     }
 
     // Sampling strategy
@@ -448,6 +534,32 @@ auto dump_info(const Options& opts, const Phylo_tree& tree, const Global_evo_mod
       {"g", pop_model->growth_rate()}
     };
     
+  } else if (auto pop_model = dynamic_cast<Skygrid_pop_model*>(opts.pop_model.get()); pop_model != nullptr) {
+    auto skygrid_type_str = std::string{};
+    switch (pop_model->type()) {
+      case Skygrid_pop_model::Type::k_staircase: skygrid_type_str = "staircase"; break;
+      case Skygrid_pop_model::Type::k_log_linear: skygrid_type_str = "log-linear"; break;
+      default: CHECK(false) << "unrecognized Skygrid type " << static_cast<int>(pop_model->type());
+    }
+    auto x_k = json::array();
+    auto x_k_dates = json::array();
+    auto gamma_k = json::array();
+    auto N_k = json::array();
+    for (auto k = 0; k <= pop_model->M(); ++k) {
+      x_k.push_back(pop_model->x(k));
+      x_k_dates.push_back(to_iso_date(pop_model->x(k), opts.t0));
+      gamma_k.push_back(pop_model->gamma(k));
+      N_k.push_back(std::exp(pop_model->gamma(k)));
+    }
+    pop_model_j = json{
+      {"type", "skygrid"},
+      {"skygrid_type", skygrid_type_str},
+      {"x_k", x_k},
+      {"x_k_dates", x_k_dates},
+      {"gamma_k", gamma_k},
+      {"N_k", N_k}
+    };
+
   } else {
     CHECK(false) << "Unknown population model type: " << *opts.pop_model;
   }
@@ -560,12 +672,19 @@ auto choose_tip_times(
 
   CHECK_GT(num_samples, 0);
   CHECK_LT(min_tip_t, max_tip_t);
-  
+
+  // Inverse-CDF sampling: sample u uniformly in [cum_pop_lo, cum_pop_hi),
+  // then invert to get t = inverse_cum_pop(u).
+  auto cum_pop_lo = pop_model.cum_pop_at_time(min_tip_t);
+  auto cum_pop_hi = pop_model.cum_pop_at_time(max_tip_t);
+  CHECK_LT(cum_pop_lo, cum_pop_hi);
+
   auto result = std::vector<double>{};
   result.reserve(num_samples);
 
   for (auto i = 0; i != num_samples; ++i) {
-    auto raw_t = pop_model.sample(min_tip_t, max_tip_t, rng);
+    auto u = absl::Uniform(absl::IntervalClosedOpen, rng, cum_pop_lo, cum_pop_hi);
+    auto raw_t = pop_model.inverse_cum_pop(u);
     // Peg to nearest ISO date
     auto t = parse_iso_date(to_iso_date(raw_t, t0), t0);
     result.push_back(t);
