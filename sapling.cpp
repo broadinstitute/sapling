@@ -50,6 +50,13 @@ struct Tip_missing_data {
 using Missing_data = absl::flat_hash_map<Node_index, Tip_missing_data>;
 
 
+// Per-tip date uncertainty level
+enum class Date_uncertainty { none, month, year };
+
+// All tip-date uncertainty, keyed by tip Node_index
+using Tip_date_uncertainty = absl::flat_hash_map<Node_index, Date_uncertainty>;
+
+
 struct Options {
   std::vector<std::string> args;
   uint32_t seed;
@@ -78,6 +85,10 @@ struct Options {
   double missing_data_mean_num_gaps;
   double missing_data_mean_gap_length;
   double missing_data_mean_num_missing_sites;
+
+  // Tip-date uncertainty
+  double p_tip_date_uncertain_upto_month;
+  double p_tip_date_uncertain_upto_year;
 
   bool output_mutation_counts;
 
@@ -174,6 +185,17 @@ auto process_args(int argc, char** argv) -> Options {
       ("missing-data-mean-num-missing-sites",
        "Mean number of individually missing sites per tip (Poisson-distributed). "
        "A value of 0.0 (default) means no individual missing sites.",
+       cxxopts::value<double>()->default_value("0.0"))
+      ;
+
+  options.add_options("Tip-date uncertainty")
+      ("p-tip-date-uncertain-upto-month",
+       "Probability of masking a tip date to month precision (YYYY-MM). "
+       "A value of 0.0 (default) means no month-level masking.",
+       cxxopts::value<double>()->default_value("0.0"))
+      ("p-tip-date-uncertain-upto-year",
+       "Probability of masking a tip date to year precision (YYYY). "
+       "A value of 0.0 (default) means no year-level masking.",
        cxxopts::value<double>()->default_value("0.0"))
       ;
 
@@ -425,6 +447,19 @@ auto process_args(int argc, char** argv) -> Options {
       fatal("Mean number of missing sites (--missing-data-mean-num-missing-sites) must be non-negative");
     }
 
+    // Tip-date uncertainty
+    auto p_tip_date_uncertain_upto_month = opts["p-tip-date-uncertain-upto-month"].as<double>();
+    if (p_tip_date_uncertain_upto_month < 0.0) {
+      fatal("Probability of month-level date uncertainty (--p-tip-date-uncertain-upto-month) must be non-negative");
+    }
+    auto p_tip_date_uncertain_upto_year = opts["p-tip-date-uncertain-upto-year"].as<double>();
+    if (p_tip_date_uncertain_upto_year < 0.0) {
+      fatal("Probability of year-level date uncertainty (--p-tip-date-uncertain-upto-year) must be non-negative");
+    }
+    if (p_tip_date_uncertain_upto_month + p_tip_date_uncertain_upto_year > 1.0) {
+      fatal("Sum of --p-tip-date-uncertain-upto-month and --p-tip-date-uncertain-upto-year must be at most 1.0");
+    }
+
     // Output files
     auto out_prefix = std::optional<std::string>{};
     if (opts.count("out-prefix")) {
@@ -466,6 +501,8 @@ auto process_args(int argc, char** argv) -> Options {
       .missing_data_mean_num_gaps = missing_data_mean_num_gaps,
       .missing_data_mean_gap_length = missing_data_mean_gap_length,
       .missing_data_mean_num_missing_sites = missing_data_mean_num_missing_sites,
+      .p_tip_date_uncertain_upto_month = p_tip_date_uncertain_upto_month,
+      .p_tip_date_uncertain_upto_year = p_tip_date_uncertain_upto_year,
       .output_mutation_counts = opts.count("output-mutation-counts") > 0,
       .out_info_filename = std::move(out_info),
       .out_newick_filename = std::move(out_newick),
@@ -485,6 +522,66 @@ auto process_args(int argc, char** argv) -> Options {
 
 auto is_missing_data_active(const Options& opts) -> bool {
   return opts.missing_data_mean_num_gaps > 0.0 || opts.missing_data_mean_num_missing_sites > 0.0;
+}
+
+auto is_tip_date_uncertainty_active(const Options& opts) -> bool {
+  return opts.p_tip_date_uncertain_upto_month > 0.0 || opts.p_tip_date_uncertain_upto_year > 0.0;
+}
+
+auto is_masking_active(const Options& opts) -> bool {
+  return is_missing_data_active(opts) || is_tip_date_uncertainty_active(opts);
+}
+
+auto truncate_date_in_name(const std::string& name, Date_uncertainty uncertainty) -> std::string {
+  CHECK(name.rfind('|') != std::string::npos) << "Tip name must contain '|': " << name;
+  auto date_start = name.rfind('|') + 1;
+  auto date_len = std::ssize(name) - static_cast<int64_t>(date_start);
+  CHECK_GE(date_len, 10) << "Date portion of tip name must be at least 10 characters (YYYY-MM-DD): " << name;
+  switch (uncertainty) {
+    case Date_uncertainty::none:
+      return name;
+    case Date_uncertainty::month:
+      return name.substr(0, std::ssize(name) - 3);  // Remove "-DD"
+    case Date_uncertainty::year:
+      return name.substr(0, std::ssize(name) - 6);  // Remove "-MM-DD"
+  }
+  CHECK(false) << "Unreachable";
+  return name;
+}
+
+auto simulate_tip_date_uncertainty(const Phylo_tree& tree, const Options& opts, absl::BitGenRef rng)
+    -> Tip_date_uncertainty {
+  auto result = Tip_date_uncertainty{};
+  for (const auto& node : index_order_traversal(tree)) {
+    if (not tree.at(node).is_tip()) { continue; }
+    auto u = absl::Uniform(rng, 0.0, 1.0);
+    if (u < opts.p_tip_date_uncertain_upto_month) {
+      result[node] = Date_uncertainty::month;
+    } else if (u < opts.p_tip_date_uncertain_upto_month + opts.p_tip_date_uncertain_upto_year) {
+      result[node] = Date_uncertainty::year;
+    } else {
+      result[node] = Date_uncertainty::none;
+    }
+  }
+  return result;
+}
+
+auto apply_tip_date_uncertainty_to_names(Phylo_tree& tree, const Tip_date_uncertainty& tip_date_uncertainty)
+    -> absl::flat_hash_map<Node_index, std::string> {
+  auto saved_names = absl::flat_hash_map<Node_index, std::string>{};
+  for (const auto& [node, uncertainty] : tip_date_uncertainty) {
+    saved_names[node] = tree.at(node).name;
+    if (uncertainty != Date_uncertainty::none) {
+      tree.at(node).name = truncate_date_in_name(tree.at(node).name, uncertainty);
+    }
+  }
+  return saved_names;
+}
+
+auto restore_tip_names(Phylo_tree& tree, const absl::flat_hash_map<Node_index, std::string>& saved_names) -> void {
+  for (const auto& [node, name] : saved_names) {
+    tree.at(node).name = name;
+  }
 }
 
 auto make_complete_filename(const std::string& filename) -> std::string {
@@ -616,19 +713,21 @@ auto dump_info(const Options& opts, const Phylo_tree& tree, const Global_evo_mod
     result["mutation_counts"] = mutation_counts;
   }
 
+  if (is_masking_active(opts)) {
+    if (opts.out_fasta_filename.has_value()) {
+      result["complete_fasta"] = make_complete_filename(opts.out_fasta_filename.value());
+    }
+    if (opts.out_maple_filename.has_value()) {
+      result["complete_maple"] = make_complete_filename(opts.out_maple_filename.value());
+    }
+  }
+
   if (is_missing_data_active(opts)) {
     auto missing_j = json{
       {"mean_num_gaps", opts.missing_data_mean_num_gaps},
       {"mean_gap_length", opts.missing_data_mean_gap_length},
       {"mean_num_missing_sites", opts.missing_data_mean_num_missing_sites}
     };
-
-    if (opts.out_fasta_filename.has_value()) {
-      missing_j["complete_fasta"] = make_complete_filename(opts.out_fasta_filename.value());
-    }
-    if (opts.out_maple_filename.has_value()) {
-      missing_j["complete_maple"] = make_complete_filename(opts.out_maple_filename.value());
-    }
 
     auto per_tip_j = json::object();
     for (const auto& node : index_order_traversal(tree)) {
@@ -656,6 +755,14 @@ auto dump_info(const Options& opts, const Phylo_tree& tree, const Global_evo_mod
     missing_j["per_tip"] = per_tip_j;
 
     result["missing_data"] = missing_j;
+  }
+
+  if (is_tip_date_uncertainty_active(opts)) {
+    result["tip_date_uncertainty"] = json{
+      {"p_uncertain_upto_month", opts.p_tip_date_uncertain_upto_month},
+      {"p_uncertain_upto_year", opts.p_tip_date_uncertain_upto_year},
+      {"p_certain", 1.0 - opts.p_tip_date_uncertain_upto_month - opts.p_tip_date_uncertain_upto_year}
+    };
   }
 
   return result.dump(2);
@@ -1227,45 +1334,81 @@ auto main(int argc, char** argv) -> int {
       missing_data = simulate_missing_data(tree, opts, rng);
     }
 
+    // Simulate tip-date uncertainty (if active)
+    auto tip_date_uncertainty = Tip_date_uncertainty{};
+    auto masking_active = is_masking_active(opts);
+    if (is_tip_date_uncertainty_active(opts)) {
+      tip_date_uncertainty = simulate_tip_date_uncertainty(tree, opts, rng);
+    }
+
+    // Output info JSON (always uses full names, never swapped)
     write_to(opts.out_info_filename, "Info", [&](auto& os) {
       os << dump_info(opts, tree, evo, missing_data) << "\n";
     });
 
-    write_to(opts.out_newick_filename, "Newick", [&](auto& os) {
-      output_newick_tree(os, tree, opts.t0, false);
-    });
-
-    write_to(opts.out_nexus_filename, "Nexus", [&](auto& os) {
-      os << "#NEXUS\n"
-         << "\n"
-         << "Begin trees;\n"
-         << "tree TREE1 = ";
-      output_newick_tree(os, tree, opts.t0, true, missing_data);
-      os << "\nEnd;\n";
-    });
-
-    if (missing_active) {
-      // Write complete (unmasked) files, then masked files
+    if (masking_active) {
+      // Write -COMPLETE files (full dates, full sequences)
       write_to(opts.out_fasta_filename.has_value()
                    ? std::optional{make_complete_filename(opts.out_fasta_filename.value())}
                    : std::nullopt,
                "Complete FASTA", [&](auto& os) {
         output_fasta(os, tree);
       });
-      write_to(opts.out_fasta_filename, "FASTA", [&](auto& os) {
-        output_fasta_with_missing_data(os, tree, missing_data);
-      });
-
       write_to(opts.out_maple_filename.has_value()
                    ? std::optional{make_complete_filename(opts.out_maple_filename.value())}
                    : std::nullopt,
                "Complete Maple", [&](auto& os) {
         output_maple(os, tree);
       });
-      write_to(opts.out_maple_filename, "Maple", [&](auto& os) {
-        output_maple_with_missing_data(os, tree, missing_data);
+
+      // Swap to uncertain tip names
+      auto saved_names = apply_tip_date_uncertainty_to_names(tree, tip_date_uncertainty);
+
+      // Output Newick/Nexus (with uncertain dates in names)
+      write_to(opts.out_newick_filename, "Newick", [&](auto& os) {
+        output_newick_tree(os, tree, opts.t0, false);
       });
+      write_to(opts.out_nexus_filename, "Nexus", [&](auto& os) {
+        os << "#NEXUS\n"
+           << "\n"
+           << "Begin trees;\n"
+           << "tree TREE1 = ";
+        output_newick_tree(os, tree, opts.t0, true, missing_data);
+        os << "\nEnd;\n";
+      });
+
+      // Output normal FASTA/MAPLE (uncertain dates, masked sequences if applicable)
+      if (missing_active) {
+        write_to(opts.out_fasta_filename, "FASTA", [&](auto& os) {
+          output_fasta_with_missing_data(os, tree, missing_data);
+        });
+        write_to(opts.out_maple_filename, "Maple", [&](auto& os) {
+          output_maple_with_missing_data(os, tree, missing_data);
+        });
+      } else {
+        write_to(opts.out_fasta_filename, "FASTA", [&](auto& os) {
+          output_fasta(os, tree);
+        });
+        write_to(opts.out_maple_filename, "Maple", [&](auto& os) {
+          output_maple(os, tree);
+        });
+      }
+
+      // Restore full tip names
+      restore_tip_names(tree, saved_names);
     } else {
+      // No masking: output all files normally
+      write_to(opts.out_newick_filename, "Newick", [&](auto& os) {
+        output_newick_tree(os, tree, opts.t0, false);
+      });
+      write_to(opts.out_nexus_filename, "Nexus", [&](auto& os) {
+        os << "#NEXUS\n"
+           << "\n"
+           << "Begin trees;\n"
+           << "tree TREE1 = ";
+        output_newick_tree(os, tree, opts.t0, true, missing_data);
+        os << "\nEnd;\n";
+      });
       write_to(opts.out_fasta_filename, "FASTA", [&](auto& os) {
         output_fasta(os, tree);
       });
