@@ -140,7 +140,7 @@ auto process_args(int argc, char** argv) -> Options {
   options.add_options("Sampling strategy")
       ("n,num-samples", "Number of tips to sample",
        cxxopts::value<int>())
-      ("min-tip-t", "Earliest possible tip date (e.g., 2019-06-15; default: 1M years before t0)",
+      ("min-tip-t", "Earliest possible tip date (e.g., 2019-06-15; default: 1 year before max-tip-t)",
        cxxopts::value<std::string>())
       ("max-tip-t", "Latest possible tip date (e.g., 2020-01-01; default: t0)",
        cxxopts::value<std::string>())
@@ -360,7 +360,7 @@ auto process_args(int argc, char** argv) -> Options {
 
     auto tip_file = std::optional<std::string>{};
     auto num_samples = 0;
-    auto min_tip_t = -1e6;
+    auto min_tip_t = 0.0;  // Will default to max_tip_t - 1.0 if unspecified
     auto max_tip_t = 0.0;
 
     if (opts.count("tip-file")) {
@@ -383,11 +383,13 @@ auto process_args(int argc, char** argv) -> Options {
       if (num_samples <= 0) {
         fatal("Number of samples (-n) should be positive");
       }
-      if (opts.count("min-tip-t")) {
-        min_tip_t = parse_iso_date(opts["min-tip-t"].as<std::string>(), t0);
-      }
       if (opts.count("max-tip-t")) {
         max_tip_t = parse_iso_date(opts["max-tip-t"].as<std::string>(), t0);
+      }
+      if (opts.count("min-tip-t")) {
+        min_tip_t = parse_iso_date(opts["min-tip-t"].as<std::string>(), t0);
+      } else {
+        min_tip_t = max_tip_t - 1.0;  // Default: 1 year before max_tip_t
       }
     }
 
