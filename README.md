@@ -1,6 +1,8 @@
 Sapling
 =======
 
+[![CI](https://github.com/broadinstitute/sapling/actions/workflows/ci.yml/badge.svg)](https://github.com/broadinstitute/sapling/actions/workflows/ci.yml)
+
 Simple simulations of pandemic-scale sequencing data with known parameters.
 
 Overview
