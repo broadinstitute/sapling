@@ -2,6 +2,7 @@ Sapling
 =======
 
 [![CI](https://github.com/broadinstitute/sapling/actions/workflows/ci.yml/badge.svg)](https://github.com/broadinstitute/sapling/actions/workflows/ci.yml)
+[![DOI](https://zenodo.org/badge/DOI/10.5281/zenodo.PLACEHOLDER.svg)](https://doi.org/10.5281/zenodo.PLACEHOLDER)
 
 Simple simulations of pandemic-scale sequencing data with known parameters.
 
